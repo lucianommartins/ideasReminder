@@ -7,7 +7,13 @@ import twilio from 'twilio';
 // Google Generative AI SDK for interacting with Gemini
 import { GoogleGenAI } from "@google/genai";
 // Import Gemini utility functions with new English names
-import { generateGeminiChatResponse, processAudioWithGemini } from './components/gemini';
+import {
+    generateGeminiChatResponse,
+    processAudioWithGemini,
+    processImageWithGemini,
+    processVideoWithGemini,
+    processDocumentWithGemini
+} from './components/gemini';
 // Import chat history types with new English names
 import { ChatHistories } from './types/chat'; 
 import axios from 'axios'; // For downloading audio
@@ -66,9 +72,9 @@ app.use(express.json());
 
 console.log('index.ts: Express server configured with middleware.');
 
-// --- HELPER FUNCTION TO DOWNLOAD AND SAVE AUDIO ---
-async function downloadAndSaveAudio(mediaUrl: string, contentType: string, senderId: string): Promise<string> {
-    console.log(`index.ts: Attempting to download audio from ${mediaUrl} for sender [${senderId}]`);
+// --- HELPER FUNCTION TO DOWNLOAD AND SAVE MEDIA ---
+async function downloadAndSaveMediaFile(mediaUrl: string, contentType: string, senderId: string): Promise<string> {
+    console.log(`index.ts: Attempting to download media from ${mediaUrl} (type: ${contentType}) for sender [${senderId}]`);
     let localFilePath: string | undefined;
     try {
         const response = await axios({
@@ -77,13 +83,14 @@ async function downloadAndSaveAudio(mediaUrl: string, contentType: string, sende
             responseType: 'stream',
         });
 
-        const fileExtension = contentType.split('/')[1] || 'audio';
-        const tempDir = path.join(os.tmpdir(), 'voicetasks_audio');
+        const fileExtension = contentType.split('/')[1] || 'tmp'; // Generalize extension
+        const tempDir = path.join(os.tmpdir(), 'voicetasks_media'); // Generalize temp directory
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
-            console.log(`index.ts: Created temporary directory for audio files: ${tempDir}`);
+            console.log(`index.ts: Created temporary directory for media files: ${tempDir}`);
         }
-        const uniqueFilename = `audio_${senderId.replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}.${fileExtension}`;
+        // Generalize filename
+        const uniqueFilename = `media_${senderId.replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}.${fileExtension}`;
         localFilePath = path.join(tempDir, uniqueFilename);
 
         const writer = fs.createWriteStream(localFilePath);
@@ -91,31 +98,34 @@ async function downloadAndSaveAudio(mediaUrl: string, contentType: string, sende
 
         return new Promise((resolve, reject) => {
             writer.on('finish', () => {
-                console.log(`index.ts: Audio file successfully downloaded and saved to ${localFilePath} for [${senderId}]`);
-                resolve(localFilePath!); // Path is confirmed to be set if 'finish' event fires
+                console.log(`index.ts: Media file successfully downloaded and saved to ${localFilePath} for [${senderId}]`);
+                resolve(localFilePath!);
             });
             writer.on('error', async (err) => {
-                console.error(`index.ts: Error writing audio file to ${localFilePath} for [${senderId}]:`, err);
-                if (localFilePath) { // Attempt to remove partial file in case of write error
+                console.error(`index.ts: Error writing media file to ${localFilePath} for [${senderId}]:`, err);
+                if (localFilePath) {
                     try {
                         await fsPromises.unlink(localFilePath);
-                        console.log(`index.ts: Partially written file ${localFilePath} was deleted.`);
+                        console.log(`index.ts: Partially written media file ${localFilePath} was deleted.`);
                     } catch (unlinkErr) {
-                        console.error(`index.ts: Failed to delete partially written file ${localFilePath}:`, unlinkErr);
+                        console.error(`index.ts: Failed to delete partially written media file ${localFilePath}:`, unlinkErr);
                     }
                 }
                 reject(err);
             });
         });
     } catch (error) {
-        console.error(`index.ts: Error downloading audio from ${mediaUrl} for [${senderId}]:`, error);
-        throw error; // Re-throw to be caught by the webhook handler
+        console.error(`index.ts: Error downloading media from ${mediaUrl} for [${senderId}]:`, error);
+        throw error;
     }
 }
 
 // --- TWILIO WEBHOOK ENDPOINT ---
 // Twilio sends POST requests to this endpoint when a message is received on your Twilio number
-const FIXED_AUDIO_PROMPT = "Answer the question in the audio.";
+const FIXED_TEXT_PROMPT_FOR_AUDIO = "Answer the question in the audio."; // Renamed for clarity
+const FIXED_TEXT_PROMPT_FOR_IMAGE = "Describe this image and answer any question it might contain.";
+const FIXED_TEXT_PROMPT_FOR_VIDEO = "Summarize this video and answer any question it might contain.";
+const FIXED_TEXT_PROMPT_FOR_DOCUMENT = "Summarize this document and answer any question it might contain.";
 
 app.post('/webhook/twilio', async (req: Request, res: Response) => {
     console.log('index.ts: POST /webhook/twilio - Request received.');
@@ -133,48 +143,89 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
     console.log(`index.ts: Processing request for sender [${senderId}], Number of media items: ${numMedia}`);
 
     if (numMedia > 0) {
-        // --- AUDIO MESSAGE HANDLING ---
         console.log(`index.ts: Detected [${numMedia}] media item(s) from sender [${senderId}].`);
         if (numMedia > 1) {
             console.warn(`index.ts: User [${senderId}] sent ${numMedia} media files. Responding with an error message.`);
-            twiml.message("Please send only one audio file at a time.");
+            twiml.message("Please send only one media file at a time.");
         } else {
             const mediaUrl = req.body.MediaUrl0 as string | undefined;
             const mediaContentType = req.body.MediaContentType0 as string | undefined;
-            let audioFilePath: string | undefined; // To be accessible in the finally block for cleanup
+            let localMediaFilePath: string | undefined; // To be accessible in the finally block for cleanup
+            let geminiMediaResponse: string | undefined;
+            const userMessage = req.body.Body as string | undefined; // Corrected variable name
 
             if (!mediaUrl || !mediaContentType) {
-                console.error(`index.ts: Missing MediaUrl0 or MediaContentType0 for audio message from [${senderId}].`);
-                twiml.message("There was an issue receiving your audio file. Please try again.");
-            } else if (!mediaContentType.startsWith('audio/')) {
-                console.warn(`index.ts: User [${senderId}] sent a non-audio file: ${mediaContentType}.`);
-                twiml.message("Only audio files are accepted. Please send an audio message.");
+                console.error(`index.ts: Missing MediaUrl0 or MediaContentType0 for media message from [${senderId}].`);
+                twiml.message("There was an issue receiving your media file. Please try again.");
             } else {
                 try {
-                    console.log(`index.ts: Downloading audio for [${senderId}]: URL [${mediaUrl}], Type [${mediaContentType}]`);
-                    audioFilePath = await downloadAndSaveAudio(mediaUrl, mediaContentType, senderId);
+                    console.log(`index.ts: Downloading media for [${senderId}]: URL [${mediaUrl}], Type [${mediaContentType}]`);
+                    localMediaFilePath = await downloadAndSaveMediaFile(mediaUrl, mediaContentType, senderId);
                     
-                    console.log(`index.ts: Processing downloaded audio [${audioFilePath}] with Gemini for [${senderId}]. Using prompt: "${FIXED_AUDIO_PROMPT}"`);
-                    let geminiAudioResponse = await processAudioWithGemini(ai, audioFilePath, mediaContentType, FIXED_AUDIO_PROMPT);
+                    console.log(`index.ts: Download complete. Path: [${localMediaFilePath}]. Determining media type for Gemini processing for [${senderId}].`);
 
-                    if (!geminiAudioResponse) {
-                        geminiAudioResponse = "I received your audio, but I couldn't formulate a response right now. Please try again.";
-                        console.warn(`index.ts: Gemini audio processing returned an empty response for [${senderId}]. Using fallback message.`);
+                    // Supported MIME types based on user's provided list
+                    const supportedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+                    const supportedAudioTypes = ['audio/ogg', 'audio/amr', 'audio/3gpp', 'audio/aac', 'audio/mpeg'];
+                    const supportedDocumentTypes = [
+                        'application/pdf', 
+                        'application/msword', // DOC
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // DOCX
+                        'application/vnd.openxmlformats-officedocument.presentationml.presentation', // PPTX
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' // XLSX
+                    ];
+                    const supportedVideoTypes = ['video/mp4'];
+
+                    // Determine the prompt: use user's message if available, otherwise use fixed prompt
+                    let effectivePrompt: string;
+
+                    if (supportedAudioTypes.includes(mediaContentType)) {
+                        effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_AUDIO;
+                        console.log(`index.ts: Processing downloaded audio [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        geminiMediaResponse = await processAudioWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
+                    } else if (supportedImageTypes.includes(mediaContentType)) {
+                        effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_IMAGE;
+                        console.log(`index.ts: Processing downloaded image [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        geminiMediaResponse = await processImageWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
+                    } else if (supportedVideoTypes.includes(mediaContentType)) {
+                        effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_VIDEO;
+                        console.log(`index.ts: Processing downloaded video [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        geminiMediaResponse = await processVideoWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
+                    } else if (supportedDocumentTypes.includes(mediaContentType)) {
+                        effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_DOCUMENT;
+                        console.log(`index.ts: Processing downloaded document [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        geminiMediaResponse = await processDocumentWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
+                    } else {
+                        console.warn(`index.ts: User [${senderId}] sent an unsupported media file type: ${mediaContentType}.`);
+                        twiml.message("The media file type you sent is not currently supported. Please try an image, audio, video, or a common document format (PDF, DOCX, PPTX, XLSX).");
+                        // No further processing for unsupported types, twiml message is set.
                     }
-                    twiml.message(geminiAudioResponse);
-                    console.log(`index.ts: Audio processing by Gemini complete for [${senderId}]. Response prepared: "${geminiAudioResponse}"`);
+
+                    if (geminiMediaResponse === undefined && !twiml.response.children.length) {
+                        // This case handles if a supported type was routed but the processing function (once implemented) failed to return a response.
+                        geminiMediaResponse = "I received your media, but I couldn't formulate a response right now. Please try again.";
+                        console.warn(`index.ts: Gemini media processing for a supported type returned an empty/undefined response for [${senderId}]. Using fallback message.`);
+                    }
+                    
+                    if (geminiMediaResponse && !twiml.response.children.length) { // Only add message if not already set (e.g., by unsupported type)
+                        twiml.message(geminiMediaResponse);
+                    }
+                    
+                    if (geminiMediaResponse) {
+                         console.log(`index.ts: Media processing by Gemini complete for [${senderId}]. Response prepared: "${geminiMediaResponse}"`);
+                    }
 
                 } catch (error) {
-                    console.error(`index.ts: Error processing audio message for [${senderId}]:`, error);
-                    twiml.message("Sorry, I encountered an error trying to understand your audio message. Please try again later.");
+                    console.error(`index.ts: Error processing media message for [${senderId}]:`, error);
+                    twiml.message("Sorry, I encountered an error trying to understand your media message. Please try again later.");
                 } finally {
-                    if (audioFilePath) {
-                        console.log(`index.ts: Attempting to delete local audio file: ${audioFilePath} for [${senderId}] in finally block.`);
+                    if (localMediaFilePath) {
+                        console.log(`index.ts: Attempting to delete local media file: ${localMediaFilePath} for [${senderId}] in finally block.`);
                         try {
-                            await fsPromises.unlink(audioFilePath);
-                            console.log(`index.ts: Successfully deleted local audio file: ${audioFilePath}`);
+                            await fsPromises.unlink(localMediaFilePath);
+                            console.log(`index.ts: Successfully deleted local media file: ${localMediaFilePath}`);
                         } catch (unlinkError) {
-                            console.error(`index.ts: Failed to delete local audio file ${audioFilePath}:`, unlinkError);
+                            console.error(`index.ts: Failed to delete local media file ${localMediaFilePath}:`, unlinkError);
                         }
                     }
                 }
