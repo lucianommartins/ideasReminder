@@ -79,6 +79,40 @@ const chatHistories: ChatHistories = {};
 const mediaDir = path.join(__dirname, '..', 'media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 
+// --- WELCOME MESSAGE FUNCTION ---
+/**
+ * Sends a rich, formatted welcome message to the user.
+ * @param {twilio.twiml.MessagingResponse} twiml The TwiML response object.
+ */
+const sendWelcomeMessage = (twiml: twilio.twiml.MessagingResponse) => {
+    console.log("index.ts: Sending welcome message.");
+    const welcomeText = `
+👋 Olá! Eu sou o *VoiceTasks*, seu assistente pessoal para o Google Tasks! 📝
+
+Comigo, você pode transformar suas ideias em tarefas, seja por texto, áudio ou até imagens, diretamente aqui no WhatsApp.
+
+*Aqui estão os comandos que você pode usar:*
+
+🤖 *Conversa Geral:*
+- Qualquer mensagem que não comece com \`/\` inicia uma conversa com a IA.
+
+🔗 *Conexão com o Google Tasks:*
+- \`/connect_google_tasks\`: Conecte sua conta do Google Tasks.
+- \`/disconnect_google_tasks\`: Desconecte sua conta.
+- \`/status_google_tasks\`: Verifique o status da sua conexão.
+
+📋 *Gerenciamento de Tarefas:*
+- \`/list_task_lists\`: Veja todas as suas listas de tarefas.
+- \`/show_tasks <nome_da_lista>\`: Mostra tarefas de uma lista específica.
+- \`/add_task <descrição_da_tarefa>\`: Adiciona uma nova tarefa à sua lista padrão.
+
+💡 *Como posso ajudar você hoje?*
+Envie uma ideia, um áudio, ou use um dos comandos acima para começar!
+    `.trim().replace(/^ +/gm, ''); // This ensures the formatting is neat in WhatsApp.
+
+    twiml.message(welcomeText);
+};
+
 // --- GOOGLE AUTH ROUTES ---
 app.get('/auth/google/initiate', (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -242,6 +276,13 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
             // Normalize message for easier command parsing
             const lowerCaseMsg = incomingMsg.toLowerCase().trim();
 
+            // Check if it's the very first interaction for this user in this session.
+            const isFirstInteraction = !chatHistories[senderId];
+            if (isFirstInteraction) {
+                console.log(`index.ts: First message received from [${senderId}]. Sending welcome message.`);
+                sendWelcomeMessage(twiml);
+            }
+
             if (lowerCaseMsg === '/connect_google_tasks') {
                 console.log(`index.ts: Received /connect_google_tasks command from [${senderId}].`);
                 
@@ -322,6 +363,9 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
                         twiml.message(`Task "${creationResponse.title}" created successfully in your default Google Tasks list!`);
                     }
                 }
+            } else if (lowerCaseMsg === '/help' || lowerCaseMsg === '/start') {
+                console.log(`index.ts: Received /help or /start command from [${senderId}]. Resending welcome message.`);
+                sendWelcomeMessage(twiml);
             } else {
                 // If the message starts with '/' it's an attempt at a command that we don't recognize.
                 if (incomingMsg.trim().startsWith('/')) {
@@ -334,12 +378,17 @@ Invalid command. Please use one of the available commands:
 • */list_task_lists* - Show all your task lists.
 • */show_tasks <list_name>* - Show tasks from a specific list (use "@default" for the default list).
 • */add_task <task_description>* - Add a new task to your default list.
+• */help* or */start* - Show this welcome message again.
 
 Any other message (not starting with /) will be treated as a conversation with the AI.
                     `.trim().replace(/^ +/gm, ''); // Trim and remove leading spaces from each line
 
                     twiml.message(commandList);
                 } else {
+                    // Initialize chat history on the first non-command message
+                    if (isFirstInteraction) {
+                        chatHistories[senderId] = [];
+                    }
                     // Default to Gemini chat if no command recognized and doesn't start with /
                     console.log(`index.ts: No command recognized. Passing to Gemini for sender [${senderId}].`);
                     let geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
