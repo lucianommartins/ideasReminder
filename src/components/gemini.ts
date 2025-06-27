@@ -97,15 +97,12 @@ async function _performGeminiChatInteraction(
     console.log(`gemini.ts_internal: Starting a new chat session for [${senderId}] with model gemini-2.5-flash.`);
     const chat = aiClient.chats.create({
         model: "gemini-2.5-flash",
-        // The system instruction is now the primary guide for the model's behavior.
-        systemInstruction: {
-            role: "system",
-            parts: [{ text: systemInstruction }]
-        },
         config: {
             // Ensure the model outputs JSON when requested by setting the response MIME type.
             // This is a powerful hint to the model to follow the JSON instruction.
             responseMimeType: "application/json",
+            // The system instruction is now the primary guide for the model's behavior.
+            systemInstruction: systemInstruction,
         },
     });
 

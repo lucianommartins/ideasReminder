@@ -275,8 +275,14 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
             // Check if it's the very first interaction for this user in this session.
             const isFirstInteraction = !chatHistories[senderId];
             if (isFirstInteraction) {
-                console.log(`index.ts: First message received from [${senderId}]. Sending welcome message.`);
+                console.log(`index.ts: First message received from [${senderId}]. Sending welcome message and initializing session.`);
                 sendWelcomeMessage(twiml);
+                chatHistories[senderId] = []; // Initialize session
+                
+                // End the interaction here to prevent Gemini from also responding to the "hello" message.
+                res.writeHead(200, { 'Content-Type': 'text/xml' });
+                res.end(twiml.toString());
+                return;
             }
 
             if (lowerCaseMsg === '/connect_google_tasks') {
@@ -328,11 +334,7 @@ Any other message (not starting with /) will be treated as a conversation with t
 
                     twiml.message(commandList);
                 } else {
-                    // Initialize chat history on the first non-command message
-                    if (isFirstInteraction) {
-                        chatHistories[senderId] = [];
-                    }
-                    // Default to Gemini chat if no command recognized and doesn't start with /
+                    // This block is now only reached on the second and subsequent messages.
                     console.log(`index.ts: No command recognized. Passing to Gemini for sender [${senderId}].`);
                     const geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
                     
