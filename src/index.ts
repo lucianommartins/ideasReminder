@@ -1,6 +1,6 @@
 /**
  * @file index.ts
- * @description This is the main entry point for the IdeasReminder application.
+ * @description This is the main entry point for the VoiceTasks application.
  * It sets up an Express server to handle incoming WhatsApp messages via a Twilio webhook.
  * The server processes text, audio, and other media messages, interacts with the
  * Google Gemini API for conversational AI, and integrates with the Google Tasks API

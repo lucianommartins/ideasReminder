@@ -1,6 +1,6 @@
-# 💡 IdeasReminder - Your WhatsApp Sidekick for Ideas and Tasks! 🧠
+# 💡 VoiceTasks - Your WhatsApp Sidekick for Ideas and Tasks! 🧠
 
-Ever have a brilliant idea闪过 (shǎn guò - flash by) your mind, only to forget it moments later? IdeasReminder is here to help! This WhatsApp bot, powered by Node.js, Express, Twilio, and Google's Gemini AI, not only captures your thoughts but also integrates seamlessly with your **Google Tasks**, turning fleeting ideas into actionable items.
+Ever have a brilliant idea闪过 (shǎn guò - flash by) your mind, only to forget it moments later? VoiceTasks is here to help! This WhatsApp bot, powered by Node.js, Express, Twilio, and Google's Gemini AI, not only captures your thoughts but also integrates seamlessly with your **Google Tasks**, turning fleeting ideas into actionable items.
 
 Send text, voice notes, or even images, and let Gemini process them. Or, use simple commands to manage your Google Tasks directly from WhatsApp.
 
@@ -38,8 +38,8 @@ Send text, voice notes, or even images, and let Gemini process them. Or, use sim
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/lucianommartins/ideasReminder.git
-cd ideasReminder
+git clone https://github.com/lucianommartins/VoiceTasks.git
+cd VoiceTasks
 ```
 
 ### 3. Install Dependencies
