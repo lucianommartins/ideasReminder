@@ -7,25 +7,28 @@
  * for task management. It also handles the OAuth2 flow for Google API authentication.
  */
 
-// --- IMPORTS ---
-// For loading environment variables from a .env file
-import * as dotenv from 'dotenv';
-import express, { Request, Response, NextFunction } from 'express'; // Added NextFunction
-// Twilio SDK for sending WhatsApp messages
+import express, { Request, Response, NextFunction } from 'express';
 import twilio from 'twilio';
-// Google Generative AI SDK for interacting with Gemini
-import { GoogleGenAI } from "@google/genai";
-// Import Gemini utility functions with new English names
-import {
-    generateGeminiChatResponse,
-    processAudioWithGemini,
+import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { promises as fsPromises } from 'fs';
+import axios from 'axios';
+import { GoogleGenAI } from '@google/genai';
+import { ChatHistories } from './types/chat';
+import { 
+    processAudioWithGemini, 
     processImageWithGemini,
     processVideoWithGemini,
-    processDocumentWithGemini
+    processDocumentWithGemini,
+    generateGeminiChatResponse,
+    FIXED_TEXT_PROMPT_FOR_AUDIO,
+    FIXED_TEXT_PROMPT_FOR_IMAGE,
+    FIXED_TEXT_PROMPT_FOR_VIDEO,
+    FIXED_TEXT_PROMPT_FOR_DOCUMENT
 } from './components/gemini';
-// Import Google Tasks utility functions
-import {
-    initiateGoogleAuth,
+import { 
+    initiateGoogleAuth, 
     handleGoogleAuthCallback,
     isUserAuthenticated,
     clearUserTokens,
@@ -34,208 +37,82 @@ import {
     getTasksInList,
     createGoogleTask
 } from './components/gtasks';
-// Import chat history types with new English names
-import { ChatHistories } from './types/chat'; 
-import axios from 'axios'; // For downloading audio
-import fs from 'fs';       // For saving files (sync operations like existsSync, mkdirSync, createWriteStream)
-import fsPromises from 'fs/promises'; // For async file operations like unlink
-import path from 'path';   // For path manipulation
-import os from 'os';       // For temporary directory
 
-// --- DOTENV CONFIGURATION ---
-// Load environment variables from .env file into process.env
-// It's crucial to call this at the very beginning of the application
+// --- INITIAL SETUP & ENVIRONMENT VALIDATION ---
 dotenv.config();
-console.log('index.ts: Environment variables loaded.');
 
-// --- ENVIRONMENT VARIABLE RETRIEVAL AND VALIDATION ---
-// This section retrieves all necessary environment variables
-// and exits the application if any are missing, providing clear error messages.
-console.log('index.ts: Validating environment variables...');
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const FROM_NUMBER = process.env.FROM_NUMBER; // Correctly use FROM_NUMBER as specified
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PORT = process.env.PORT || '3000'; // Default to port 3000 if not specified
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+const requiredEnvVars = [
+    'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'FROM_NUMBER', 
+    'GEMINI_API_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI'
+];
 
-if (!TWILIO_ACCOUNT_SID) {
-    console.error('index.ts: FATAL ERROR - TWILIO_ACCOUNT_SID is not set. Application will exit.');
+const missingEnvVars = requiredEnvVars.filter(key => !process.env[key]);
+if (missingEnvVars.length > 0) {
+    console.error(`FATAL ERROR: Missing required environment variables: ${missingEnvVars.join(', ')}`);
     process.exit(1);
 }
-if (!TWILIO_AUTH_TOKEN) {
-    console.error('index.ts: FATAL ERROR - TWILIO_AUTH_TOKEN is not set. Application will exit.');
-    process.exit(1);
-}
-if (!FROM_NUMBER) {
-    console.error('index.ts: FATAL ERROR - FROM_NUMBER is not set. This is required for sending proactive messages. Application will exit.');
-    process.exit(1);
-}
-if (!GEMINI_API_KEY) {
-    console.error('index.ts: FATAL ERROR - GEMINI_API_KEY is not set. Application will exit.');
-    process.exit(1);
-}
-if (!GOOGLE_CLIENT_ID) {
-    console.error('index.ts: FATAL ERROR - GOOGLE_CLIENT_ID is not set. Application will exit.');
-    process.exit(1);
-}
-if (!GOOGLE_CLIENT_SECRET) {
-    console.error('index.ts: FATAL ERROR - GOOGLE_CLIENT_SECRET is not set. Application will exit.');
-    process.exit(1);
-}
-if (!GOOGLE_REDIRECT_URI) {
-    console.error('index.ts: FATAL ERROR - GOOGLE_REDIRECT_URI is not set. Application will exit.');
-    process.exit(1);
-}
-console.log('index.ts: Environment variables validated successfully.');
 
-// --- DYNAMIC SERVER BASE URL ---
-// This logic derives the server's public-facing base URL from the GOOGLE_REDIRECT_URI.
-// This is crucial for ensuring that links sent to users (like for OAuth) use the correct public URL (e.g., from ngrok).
+const { 
+    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, FROM_NUMBER,
+    GEMINI_API_KEY, GOOGLE_REDIRECT_URI
+} = process.env;
+
+// Dynamically derive the server's base URL from the GOOGLE_REDIRECT_URI.
 let SERVER_BASE_URL: string;
 try {
-    // We assume GOOGLE_REDIRECT_URI is something like 'https://[your-ngrok-url]/auth/google/callback'
-    // The .origin property will correctly extract 'https://[your-ngrok-url]'
-    const redirectUrl = new URL(GOOGLE_REDIRECT_URI!);
-    SERVER_BASE_URL = redirectUrl.origin;
-    console.log(`index.ts: SERVER_BASE_URL dynamically set from GOOGLE_REDIRECT_URI: ${SERVER_BASE_URL}`);
+    const redirectUri = new URL(GOOGLE_REDIRECT_URI!);
+    SERVER_BASE_URL = redirectUri.origin;
+    console.log(`index.ts: Dynamically determined SERVER_BASE_URL to be: ${SERVER_BASE_URL}`);
 } catch (error) {
-    console.error('index.ts: Invalid GOOGLE_REDIRECT_URI format. Could not parse to determine SERVER_BASE_URL.');
-    console.error('index.ts: Please ensure GOOGLE_REDIRECT_URI is a full, valid URL (e.g., "https://example.com/callback").');
-    // Fallback or exit if this is critical
-    console.log(`index.ts: Falling back to default SERVER_BASE_URL: http://localhost:${PORT}`);
-    SERVER_BASE_URL = `http://localhost:${PORT}`;
+    console.error('FATAL ERROR: GOOGLE_REDIRECT_URI is not a valid URL. Please check your .env file.');
+    process.exit(1);
 }
 
-// --- TWILIO CLIENT INITIALIZATION ---
-// Initialize the main Twilio client for sending proactive messages
-console.log('index.ts: Initializing Twilio client...');
-const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-console.log('index.ts: Twilio client initialized successfully.');
-
-// --- GEMINI API CLIENT INITIALIZATION ---
-console.log('index.ts: Initializing GoogleGenAI client...');
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-console.log('index.ts: GoogleGenAI client initialized successfully.');
-
-// --- CHAT HISTORY STORE (IN-MEMORY) ---
-// WARNING: This in-memory storage will be lost if the server restarts.
-// For production, consider a persistent database (e.g., Redis, Firestore).
-const chatHistories: ChatHistories = {};
-console.log('index.ts: In-memory chat history store initialized.');
-
-// --- EXPRESS SERVER SETUP ---
 const app = express();
-
-// Middleware to parse URL-encoded data (typically from webhooks like Twilio)
+const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
-// Middleware to parse JSON data in request bodies
 app.use(express.json());
 
-console.log('index.ts: Express server configured with middleware.');
-
-// --- HELPER FUNCTION TO DOWNLOAD AND SAVE MEDIA ---
-async function downloadAndSaveMediaFile(mediaUrl: string, contentType: string, senderId: string): Promise<string> {
-    console.log(`index.ts: Attempting to download media from ${mediaUrl} (type: ${contentType}) for sender [${senderId}]`);
-    let localFilePath: string | undefined;
-    try {
-        const response = await axios({
-            method: 'get',
-            url: mediaUrl,
-            responseType: 'stream',
-        });
-
-        const fileExtension = contentType.split('/')[1] || 'tmp'; // Generalize extension
-        const tempDir = path.join(os.tmpdir(), 'voicetasks_media'); // Generalize temp directory
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-            console.log(`index.ts: Created temporary directory for media files: ${tempDir}`);
-        }
-        // Generalize filename
-        const uniqueFilename = `media_${senderId.replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}.${fileExtension}`;
-        localFilePath = path.join(tempDir, uniqueFilename);
-
-        const writer = fs.createWriteStream(localFilePath);
-        response.data.pipe(writer);
-
-        return new Promise((resolve, reject) => {
-            writer.on('finish', () => {
-                console.log(`index.ts: Media file successfully downloaded and saved to ${localFilePath} for [${senderId}]`);
-                resolve(localFilePath!);
-            });
-            writer.on('error', async (err) => {
-                console.error(`index.ts: Error writing media file to ${localFilePath} for [${senderId}]:`, err);
-                if (localFilePath) {
-                    try {
-                        await fsPromises.unlink(localFilePath);
-                        console.log(`index.ts: Partially written media file ${localFilePath} was deleted.`);
-                    } catch (unlinkErr) {
-                        console.error(`index.ts: Failed to delete partially written media file ${localFilePath}:`, unlinkErr);
-                    }
-                }
-                reject(err);
-            });
-        });
-    } catch (error) {
-        console.error(`index.ts: Error downloading media from ${mediaUrl} for [${senderId}]:`, error);
-        throw error;
-    }
-}
-
-// --- TWILIO WEBHOOK ENDPOINT ---
-// Twilio sends POST requests to this endpoint when a message is received on your Twilio number
-const FIXED_TEXT_PROMPT_FOR_AUDIO = "Answer the question in the audio."; // Renamed for clarity
-const FIXED_TEXT_PROMPT_FOR_IMAGE = "Describe this image and answer any question it might contain.";
-const FIXED_TEXT_PROMPT_FOR_VIDEO = "Summarize this video and answer any question it might contain.";
-const FIXED_TEXT_PROMPT_FOR_DOCUMENT = "Summarize this document and answer any question it might contain.";
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+const chatHistories: ChatHistories = {};
+const mediaDir = path.join(__dirname, '..', 'media');
+if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 
 // --- GOOGLE AUTH ROUTES ---
-// Route to initiate Google OAuth flow
-app.get('/auth/google/initiate', (req: Request, res: Response) => {
-    const senderId = req.query.senderId as string;
-    if (!senderId) {
-        console.error("index.ts: /auth/google/initiate called without a senderId.");
-        return res.status(400).send('Authentication failed: Missing user identifier.');
+app.get('/auth/google/initiate', (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const senderId = req.query.senderId as string;
+        if (!senderId) {
+            return res.status(400).send('Authentication failed: Missing user identifier.');
+        }
+        const authUrl = initiateGoogleAuth(senderId);
+        return res.redirect(authUrl);
+    } catch (error) {
+        return next(error);
     }
-    // This function is synchronous, so no need for async/await or try/catch here.
-    const authUrl = initiateGoogleAuth(senderId);
-    res.redirect(authUrl);
 });
 
-// Callback route for Google OAuth
-app.get('/auth/google/callback', async (req: Request, res: Response) => {
-    const { code, state: senderId, error: errorQueryParam } = req.query;
-
-    if (errorQueryParam) {
-        console.error(`index.ts: /auth/google/callback error from Google: ${errorQueryParam} for senderId [${senderId}].`);
-        return res.status(400).send(`<html><body><h1>Authentication Failed</h1><p>Google authentication failed: ${errorQueryParam}. You can close this page.</p></body></html>`);
-    }
-
-    if (!code || typeof code !== 'string' || !senderId || typeof senderId !== 'string') {
-        console.error("index.ts: /auth/google/callback called with missing code or state.", { query: req.query });
-        return res.status(400).send('Authentication failed: Missing authorization code or user identifier.');
-    }
-
+app.get('/auth/google/callback', async (req: Request, res: Response, next: NextFunction) => {
     try {
+        const { code, state: senderId, error: errorQueryParam } = req.query;
+        if (errorQueryParam) {
+            return res.status(400).send(`<html><body><h1>Authentication Failed</h1><p>Google authentication failed: ${errorQueryParam}. You can close this page.</p></body></html>`);
+        }
+        if (!code || typeof code !== 'string' || !senderId || typeof senderId !== 'string') {
+            return res.status(400).send('Authentication failed: Missing authorization code or user identifier.');
+        }
         await handleGoogleAuthCallback(code, senderId);
-        
-        // --- Send proactive success message to user on WhatsApp ---
-        console.log(`index.ts: Attempting to send proactive auth success message to [${senderId}].`);
         try {
             await twilioClient.messages.create({
                 body: '✅ Authentication with Google Tasks was successful! You can now use task-related commands.',
                 from: FROM_NUMBER!,
                 to: senderId
             });
-            console.log(`index.ts: Proactive message sent successfully to [${senderId}].`);
         } catch (twilioError) {
             console.error(`index.ts: FAILED to send proactive success message to [${senderId}].`, twilioError);
         }
-        
-        // --- Display a user-friendly success page in the browser ---
-        res.send(`
+        return res.send(`
             <html>
                 <head><title>Authentication Successful</title></head>
                 <body>
@@ -245,13 +122,12 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
                 </body>
             </html>
         `);
-        
     } catch (error) {
-        console.error(`index.ts: Error during Google OAuth callback for sender [${senderId}]:`, error);
-        res.status(500).send('<html><body><h1>Authentication Error</h1><p>An error occurred while authenticating with Google. Please try again. You can close this page.</p></body></html>');
+        return next(error);
     }
 });
 
+// --- MAIN TWILIO WEBHOOK ---
 app.post('/webhook/twilio', async (req: Request, res: Response) => {
     console.log('index.ts: POST /webhook/twilio - Request received.');
     const { MessagingResponse } = twilio.twiml;
@@ -482,6 +358,34 @@ Any other message (not starting with /) will be treated as a conversation with t
     res.writeHead(200, { 'Content-Type': 'text/xml' });
     res.end(twiml.toString());
 });
+
+
+// --- UTILITY FUNCTIONS ---
+// This function downloads media from a Twilio URL and saves it to a local temporary file.
+async function downloadAndSaveMediaFile(mediaUrl: string, mediaContentType: string, senderId: string): Promise<string> {
+    const sanitizedSenderId = senderId.replace(/[^a-zA-Z0-9]/g, '_');
+    const fileExtension = mediaContentType.split('/')[1] || 'tmp';
+    const localFilePath = path.join(mediaDir, `${sanitizedSenderId}-${Date.now()}.${fileExtension}`);
+    
+    const response = await axios({
+        method: 'GET',
+        url: mediaUrl,
+        responseType: 'stream',
+        auth: {
+            username: TWILIO_ACCOUNT_SID!,
+            password: TWILIO_AUTH_TOKEN!
+        }
+    });
+
+    const writer = fs.createWriteStream(localFilePath);
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+        writer.on('finish', () => resolve(localFilePath));
+        writer.on('error', reject);
+    });
+}
+
 
 // --- START EXPRESS SERVER ---
 app.listen(PORT, () => {
