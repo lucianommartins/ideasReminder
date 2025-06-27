@@ -1,122 +1,147 @@
-# 💡 IdeasReminder - Your WhatsApp Sidekick for Capturing Brilliance! 🧠
+# 💡 IdeasReminder - Your WhatsApp Sidekick for Ideas and Tasks! 🧠
 
-Ever have a brilliant idea闪过 (shǎn guò - flash by) your mind, only to forget it moments later? 😫 IdeasReminder is here to help! This nifty WhatsApp bot, powered by Node.js, Express, Twilio, and Google's Gemini AI, lets you send text or voice notes to a dedicated WhatsApp number. Gemini then processes your thoughts, and for now, it sends a helpful response right back to you! 🚀 Perfect for quickly jotting down those fleeting thoughts on the go.
+Ever have a brilliant idea闪过 (shǎn guò - flash by) your mind, only to forget it moments later? IdeasReminder is here to help! This WhatsApp bot, powered by Node.js, Express, Twilio, and Google's Gemini AI, not only captures your thoughts but also integrates seamlessly with your **Google Tasks**, turning fleeting ideas into actionable items.
+
+Send text, voice notes, or even images, and let Gemini process them. Or, use simple commands to manage your Google Tasks directly from WhatsApp.
 
 ## ✨ Features
 
-*   Receive WhatsApp messages (text and audio) via a Twilio webhook.
-*   Process incoming text messages using Google Gemini, maintaining chat history per user.
-*   Download and process incoming WhatsApp audio messages using Google Gemini.
-*   Send AI-generated responses back to the user via TwiML (Twilio Markup Language).
+*   **Conversational AI:** Chat naturally with the Gemini Pro model. It maintains a separate conversation history for each user.
+*   **Multimedia Processing:** Send audio, images, videos, or documents (PDF, DOCX, etc.) for Gemini to analyze and discuss.
+*   **Google Tasks Integration:**
+    *   Securely connect your Google Account using an OAuth2 flow.
+    *   List all your Google Task lists.
+    *   View tasks within any specific list.
+    *   Add new tasks to your default list with a simple command.
+    *   Check the status of your connection.
+*   **Persistent Connections:** User authentication tokens for Google Tasks are securely stored, so you only need to connect your account once.
+*   **Command-Driven Interface:** A clear set of commands for interacting with Google Tasks, with a helpful guide for invalid commands.
 
 ## 🛠️ Tech Stack
-
-This project is built with a cool blend of modern technologies:
 
 *   **Backend:** Node.js, Express.js
 *   **Language:** TypeScript
 *   **Messaging:** Twilio API (for WhatsApp)
-*   **AI & NLP:** Google Gemini API (specifically `gemini-2.5-flash` for text and audio processing)
+*   **AI & NLP:** Google Gemini API
+*   **Google Integration:** Google Tasks API, Google Auth Library
 *   **Environment Management:** `dotenv`
-*   **HTTP Requests:** `axios` (for fetching audio files from Twilio)
-*   **Development:**
-    *   `ts-node`: For running TypeScript directly during development.
-    *   `typescript`: For compiling TypeScript to JavaScript.
-
-## 📋 Prerequisites
-
-Before you dive in, make sure you have these installed on your system:
-
-*   Node.js (v18.x or later recommended)
-*   npm (which comes bundled with Node.js) or Yarn
-*   Git (for cloning this awesome project!)
+*   **HTTP Requests:** `axios`
 
 ## 🚀 Getting Started
 
-Follow these steps to get IdeasReminder up and running:
+### 1. Prerequisites
 
-1.  **Clone the Repository:**
-    Open your terminal and run:
-    ```bash
-    git clone https://github.com/lucianommartins/ideasReminder.git
-    cd ideasReminder
-    ```
+*   Node.js (v18.x or later)
+*   npm (or Yarn)
+*   Git
+*   An [ngrok](https://ngrok.com/) account to expose your local server to the internet for Twilio webhooks.
 
-2.  **Install Dependencies:**
-    This command will download and install all the necessary packages defined in `package.json`.
-    ```bash
-    npm install
-    ```
+### 2. Clone the Repository
+```bash
+git clone https://github.com/lucianommartins/ideasReminder.git
+cd ideasReminder
+```
 
-3.  **Set Up Environment Variables:**
-    The application requires some secret keys and configuration details to function. You'll need to create a `.env` file in the root directory of the project.
+### 3. Install Dependencies
+```bash
+npm install
+```
 
-    You can create this file by running:
-    ```bash
-    touch .env
-    ```
-    Then, open the newly created `.env` file and add the following lines, replacing the placeholder values with your actual credentials:
+### 4. Google Cloud Project Setup
 
-    ```env
-    # Twilio Credentials
-    TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
-    FROM_NUMBER=whatsapp:+14155238886 # Your Twilio WhatsApp Sandbox or activated number
+To use the Google Tasks integration, you need to set up a project in the Google Cloud Console.
 
-    # Google Gemini API Key
-    GEMINI_API_KEY=your_google_gemini_api_key_here
+1.  **Create a Project:** Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a new project.
+2.  **Enable APIs:** In your new project, go to the "APIs & Services" dashboard and click "+ ENABLE APIS AND SERVICES". Search for and enable the **Google Tasks API**.
+3.  **Configure OAuth Consent Screen:**
+    *   Go to "APIs & Services" > "OAuth consent screen".
+    *   Choose **External** and create a new consent screen.
+    *   Fill in the required app information (app name, user support email, developer contact).
+    *   On the "Scopes" page, click "Add or Remove Scopes" and add the scope for the Google Tasks API: `../auth/tasks`.
+    *   On the "Test users" page, add the Google account(s) you will be testing with.
+    *   **Crucially**, once you are ready, go back to the "OAuth consent screen" and click **"PUBLISH APP"** to move it from "Testing" to "In production". This ensures your refresh tokens do not expire every 7 days.
 
-    # Server Configuration
-    PORT=3000 # Or any port you prefer for the Express server
-    ```
+4.  **Create Credentials:**
+    *   Go to "APIs & Services" > "Credentials".
+    *   Click "+ CREATE CREDENTIALS" and choose "OAuth client ID".
+    *   Select **Web application** as the application type.
+    *   Under "Authorized redirect URIs", click "+ ADD URI" and add the URL that ngrok will provide. For now, you can use a placeholder like `http://localhost:3000/auth/google/callback`, but you will need to update this later.
+    *   Click "Create". You will be shown your **Client ID** and **Client Secret**. Copy these securely.
 
-    **Where to find these credentials:**
-    *   `TWILIO_ACCOUNT_SID` & `TWILIO_AUTH_TOKEN`: You can find these on your [Twilio Console dashboard](https://www.twilio.com/console).
-    *   `FROM_NUMBER`: This is your Twilio WhatsApp-enabled phone number. If you're using the Twilio Sandbox for WhatsApp, this will be the Sandbox number.
-    *   `GEMINI_API_KEY`: Obtain this from the [Google AI Studio](https://aistudio.google.com/app/apikey).
-    *   `PORT`: The local port on which your Express server will listen for incoming webhook requests. `3000` is a common default.
+### 5. Set Up Environment Variables
 
-4.  **Configure Twilio Webhook:**
-    For Twilio to forward incoming WhatsApp messages to your running application, you need to expose your local server to the internet. Tools like [ngrok](https://ngrok.com/) are fantastic for this during development.
+Create a `.env` file in the root of the project:
+```bash
+touch .env
+```
 
-    *   **Start ngrok:** If your application is running on port 3000 (as per the `.env` example), run:
-        ```bash
-        ngrok http 3000
-        ```
-    *   **Get the ngrok URL:** Ngrok will provide you with a forwarding URL (e.g., `https://xxxx-xx-xxx-xx-xx.ngrok.io`). Copy the `https` URL.
-    *   **Update Twilio Settings:** Go to your Twilio Console.
-        *   If using a specific Twilio phone number: Navigate to Phone Numbers > Manage > Active Numbers, click on your WhatsApp-enabled number, and find the "Messaging" section.
-        *   If using the Twilio Sandbox for WhatsApp: Go to Messaging > Try it out > Send a WhatsApp message.
-        *   In the "WHEN A MESSAGE COMES IN" field (or similar webhook configuration field), paste your ngrok URL followed by `/webhook/twilio`. For example: `https://YOUR_NGROK_HTTPS_URL.ngrok.io/webhook/twilio`.
-        *   Ensure the HTTP method is set to `POST`.
-        *   Save your changes.
+Open the file and add the following variables, replacing the placeholders with your actual credentials:
 
-## ▶️ Running the Project
+```env
+# Twilio Credentials
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
 
-You have a couple of options to run the application:
+# Your Twilio number (the one sending messages)
+FROM_NUMBER=whatsapp:+14155238886
 
-*   **Development Mode (using `ts-node` for auto-recompilation on changes):**
-    This is convenient during development as it automatically restarts the server when you make changes to the TypeScript files.
+# Google Gemini API Key
+GEMINI_API_KEY=your_gemini_api_key
+
+# Google OAuth2 Credentials
+GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+# This MUST match the redirect URI you configured in your Google Cloud credentials
+# and it MUST use the HTTPS ngrok URL for the live application.
+GOOGLE_REDIRECT_URI=https://YOUR_NGROK_HTTPS_URL.ngrok.io/auth/google/callback
+
+# Server Port
+PORT=3000
+```
+
+### 6. Run the Application and Configure Webhooks
+
+1.  **Start the local server:**
     ```bash
     npm start
     ```
 
-*   **Production Mode (build first, then run the compiled JavaScript):**
-    1.  **Build the project:** This command compiles your TypeScript code into JavaScript, placing the output in the `dist` directory.
-        ```bash
-        npm run build
-        ```
-    2.  **Run the compiled application:**
-        ```bash
-        node dist/index.js
-        ```
+2.  **Expose your server with ngrok:**
+    In a new terminal, run:
+    ```bash
+    ngrok http 3000
+    ```
+    Ngrok will give you a public HTTPS URL (e.g., `https://xxxx-xxxx-xxxx.ngrok.io`). **Copy this URL.**
 
-Your server should now be running! 🎉 Send a message to your Twilio WhatsApp number, and you should see the magic happen.
+3.  **Update Google Redirect URI:**
+    *   Go back to your [Google Cloud Console Credentials](https://console.cloud.google.com/apis/credentials).
+    *   Edit your OAuth 2.0 Client ID.
+    *   Update the "Authorized redirect URI" to be your ngrok HTTPS URL followed by `/auth/google/callback`.
+    *   **Example:** `https://xxxx-xxxx-xxxx.ngrok.io/auth/google/callback`
+    *   Update the `GOOGLE_REDIRECT_URI` in your `.env` file to match this exactly.
 
-## 🤔 A Note on In-Memory Storage
+4.  **Configure Twilio Webhook:**
+    *   Go to your Twilio number settings in the Twilio Console.
+    *   Under the "Messaging" section, in the "A MESSAGE COMES IN" field, set the webhook to your ngrok HTTPS URL followed by `/webhook/twilio`.
+    *   **Example:** `https://xxxx-xxxx-xxxx.ngrok.io/webhook/twilio`
+    *   Ensure the HTTP method is set to `POST`.
+    *   Save your changes.
 
-Currently, chat histories are stored in memory. This means that if the server restarts, all chat history will be lost. For a production environment, you'd want to integrate a persistent storage solution like a database (e.g., Redis, PostgreSQL, MongoDB).
+5.  **Restart the Node.js server** to apply the changes from your `.env` file.
+
+## 🤖 Bot Commands
+
+Interact with the bot using the following commands in WhatsApp:
+
+*   **Any message not starting with `/`**: Starts or continues a conversation with the Gemini AI.
+
+*   `/connect_google_tasks`: Initiates the process to connect your Google Tasks account. The bot will send you a unique link to authorize the application.
+*   `/disconnect_google_tasks`: Disconnects your Google Tasks account and deletes your stored authentication tokens.
+*   `/status_google_tasks`: Checks if you are connected and shows when your current access token expires.
+*   `/list_task_lists`: Displays all of your Google Task lists.
+*   `/show_tasks <list_name>`: Shows all active tasks from a specific list. Use `@default` for your default task list.
+*   `/add_task <task_description>`: Adds a new task with the given description to your default task list.
 
 ---
 
-Happy idea capturing! Let me know if you have more brilliant ideas for this bot. 😉 
+Happy idea capturing and task managing! 

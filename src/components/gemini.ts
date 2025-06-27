@@ -1,5 +1,25 @@
+/**
+ * @file gemini.ts
+ * @description This module encapsulates all interactions with the Google Gemini API.
+ * It handles text chats, processes various media types (audio, image, video, document),
+ * maintains conversation history, and includes a priming mechanism to ensure the AI
+ * responds in the user's language.
+ */
+
 import { GoogleGenAI, createPartFromUri, Part } from "@google/genai";
 import { ChatHistoryItem, ChatHistories, ChatMessagePart } from "../types/chat";
+
+/**
+ * System-level instructions to prime the Gemini model for consistent behavior.
+ * This instruction ensures the model always replies in the same language as the user.
+ */
+const LANGUAGE_PRIMING_USER = "IMPORTANT: From now on, you MUST respond in the exact same language I use. If I use Portuguese, you respond in Portuguese. If I use English, you respond in English. Do not translate unless I explicitly ask you to.";
+const LANGUAGE_PRIMING_MODEL = "Understood. I will always respond in the same language as your message.";
+
+export const FIXED_TEXT_PROMPT_FOR_AUDIO = "Transcribe this audio. If it's music, identify the song and artist.";
+export const FIXED_TEXT_PROMPT_FOR_IMAGE = "Describe this image in detail.";
+export const FIXED_TEXT_PROMPT_FOR_VIDEO = "Describe what happens in this video.";
+export const FIXED_TEXT_PROMPT_FOR_DOCUMENT = "Summarize this document.";
 
 /**
  * Interface for the result of the internal chat interaction helper.
@@ -26,10 +46,21 @@ async function _performGeminiChatInteraction(
     messageContentToSend: string | Part[],
     userHistoryPartsToLog: ChatMessagePart[]
 ): Promise<GeminiChatInteractionResult> {
+    // Create a temporary history for this specific API call to avoid mutating the stored history.
+    const historyForThisTurn = [...currentHistoryForUser];
+
+    // Prepend the language priming instruction to the start of the conversation history.
+    // This ensures Gemini always gets the instruction to reply in the user's language.
+    // We prepend it every time to a temporary copy, so the actual stored history remains clean.
+    historyForThisTurn.unshift(
+        { role: "model", parts: [{ text: LANGUAGE_PRIMING_MODEL }] },
+        { role: "user", parts: [{ text: LANGUAGE_PRIMING_USER }] }
+    );
+    
     console.log(`gemini.ts_internal: Creating/continuing chat session for [${senderId}] with model gemini-2.5-flash.`);
     const chat = aiClient.chats.create({
         model: "gemini-2.5-flash",
-        history: currentHistoryForUser,
+        history: historyForThisTurn,
         config: {
             thinkingConfig: {
                 thinkingBudget: 0,
@@ -83,161 +114,58 @@ export async function generateGeminiChatResponse(
             aiClient,
             senderId,
             currentHistory,
-            newUserMessage, // Send as simple string
+            newUserMessage,
             userHistoryParts
         );
 
         if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry);
-            currentHistory.push(modelHistoryEntry);
+            currentHistory.push(userHistoryEntry, modelHistoryEntry);
             chatHistories[senderId] = currentHistory;
-            console.log(`gemini.ts: Updated history for [${senderId}] after text chat:`, JSON.stringify(chatHistories[senderId], null, 2));
         }
         return modelResponseText;
 
     } catch (error) {
-        console.error(`gemini.ts: An error occurred while calling Gemini chat API for [${senderId}]:`, error);
-        if (error instanceof Error) {
-            console.error(`  Error Type: ${error.constructor.name}`);
-            console.error(`  Error Name: ${error.name}`);
-            console.error(`  Error Message: ${error.message}`);
-            if (error.stack) {
-                console.error(`  Stack Trace:\n${error.stack}`);
-            }
-        } else {
-            console.error('  An unknown or non-standard error object was caught:', error);
-        }
-        return '';
-    } finally {
-        console.log(`gemini.ts: generateGeminiChatResponse() function execution finished for [${senderId}].`);
+        console.error(`gemini.ts: Error in generateGeminiChatResponse for [${senderId}]:`, error);
+        return "Sorry, I encountered an error while processing your message. Please try again.";
     }
 }
 
 /**
- * Processes an audio file with Gemini using a fixed prompt, maintaining conversation history.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender.
- * @param audioFilePath Path to the local audio file.
- * @param audioMimeType MIME type of the audio file (e.g., "audio/ogg", "audio/mpeg").
- * @param textPrompt The fixed text prompt to send along with the audio.
- * @param chatHistories An object storing chat histories for all users.
- * @returns A promise that resolves to the generated text response, or an empty string if an error occurs.
+ * A generic, internal function to process any media file with Gemini.
+ * It uploads the file, sends it to the model with a prompt, and updates chat history.
+ * @param mediaType A string descriptor for the media type (e.g., "audio", "image") for logging purposes.
+ * @param aiClient The initialized GoogleGenAI client.
+ * @param senderId The user's unique identifier.
+ * @param filePath Path to the local media file.
+ * @param mimeType MIME type of the media file.
+ * @param textPrompt The text prompt to accompany the media.
+ * @param chatHistories The collection of all user chat histories.
+ * @returns A promise that resolves to the generated text response.
  */
-export async function processAudioWithGemini(
+async function _processMediaWithGemini(
+    mediaType: 'Audio' | 'Image' | 'Video' | 'Document',
     aiClient: GoogleGenAI,
     senderId: string,
-    audioFilePath: string,
-    audioMimeType: string,
+    filePath: string,
+    mimeType: string,
     textPrompt: string,
     chatHistories: ChatHistories
 ): Promise<string> {
-    console.log(`gemini.ts: Entered processAudioWithGemini() for sender [${senderId}]. Audio: ${audioFilePath}, Type: ${audioMimeType}, Prompt: "${textPrompt}"`);
-
+    console.log(`gemini.ts: Processing ${mediaType} for [${senderId}]. File: ${filePath}, Type: ${mimeType}`);
     const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
-    console.log(`gemini.ts: Current history for [${senderId}] before audio processing:`, JSON.stringify(currentHistory, null, 2));
 
     try {
-        console.log(`gemini.ts: Uploading audio file [${audioFilePath}] to Gemini for [${senderId}]...`);
+        console.log(`gemini.ts: Uploading ${mediaType} file [${filePath}] for [${senderId}]...`);
         const uploadedFile = await aiClient.files.upload({
-            file: audioFilePath,
-            config: { mimeType: audioMimeType },
+            file: filePath,
+            config: { mimeType: mimeType },
         });
-        console.log(`gemini.ts: Audio file uploaded for [${senderId}]. URI: ${uploadedFile.uri}, MIME Type: ${uploadedFile.mimeType}, Name: ${uploadedFile.name}`);
 
-        if (!uploadedFile.uri || typeof uploadedFile.uri !== 'string') {
-            console.error(`gemini.ts: Uploaded file response from Gemini is missing a valid URI for [${senderId}].`);
-            return '';
+        if (!uploadedFile.uri || !uploadedFile.mimeType) {
+            console.error(`gemini.ts: Invalid file upload response for ${mediaType} from [${senderId}].`);
+            return `Sorry, there was a problem uploading your ${mediaType.toLowerCase()} file.`;
         }
-        if (!uploadedFile.mimeType || typeof uploadedFile.mimeType !== 'string') {
-            console.error(`gemini.ts: Uploaded file response from Gemini is missing a valid MIME type for [${senderId}].`);
-            return '';
-        }
-
-        const messageContentToSend: Part[] = [ // This will be sent to Gemini
-            createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
-            { text: textPrompt },
-        ];
-        
-        // This is how the user's turn will be logged in history
-        const userHistoryPartsToLog: ChatMessagePart[] = [
-            { fileData: { mimeType: audioMimeType, fileUri: uploadedFile.uri } },
-            { text: textPrompt }
-        ];
-
-        const { modelResponseText, userHistoryEntry, modelHistoryEntry } = await _performGeminiChatInteraction(
-            aiClient,
-            senderId,
-            currentHistory,
-            messageContentToSend, // Send as Part[]
-            userHistoryPartsToLog
-        );
-
-        if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry);
-            currentHistory.push(modelHistoryEntry);
-            chatHistories[senderId] = currentHistory;
-            console.log(`gemini.ts: Updated history for [${senderId}] after audio processing:`, JSON.stringify(chatHistories[senderId], null, 2));
-        }
-        
-        return modelResponseText;
-
-    } catch (error) {
-        console.error(`gemini.ts: An error occurred while processing audio with Gemini for [${senderId}]:`, error);
-        if (error instanceof Error) {
-            console.error(`  Error Type: ${error.constructor.name}`);
-            console.error(`  Error Name: ${error.name}`);
-            console.error(`  Error Message: ${error.message}`);
-            if (error.stack) {
-                console.error(`  Stack Trace:\n${error.stack}`);
-            }
-        } else {
-            console.error('  An unknown or non-standard error object was caught in audio processing for [${senderId}]:', error);
-        }
-        return '';
-    } finally {
-        console.log(`gemini.ts: processAudioWithGemini() function execution finished for [${senderId}].`);
-    }
-}
-
-/**
- * Processes an image file with Gemini using a fixed prompt, maintaining conversation history.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender.
- * @param imageFilePath Path to the local image file.
- * @param imageMimeType MIME type of the image file (e.g., "image/jpeg", "image/png").
- * @param textPrompt The fixed text prompt to send along with the image.
- * @param chatHistories An object storing chat histories for all users.
- * @returns A promise that resolves to the generated text response, or an empty string if an error occurs.
- */
-export async function processImageWithGemini(
-    aiClient: GoogleGenAI,
-    senderId: string,
-    imageFilePath: string,
-    imageMimeType: string,
-    textPrompt: string,
-    chatHistories: ChatHistories
-): Promise<string> {
-    console.log(`gemini.ts: Entered processImageWithGemini() for sender [${senderId}]. Image: ${imageFilePath}, Type: ${imageMimeType}, Prompt: "${textPrompt}"`);
-
-    const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
-    console.log(`gemini.ts: Current history for [${senderId}] before image processing:`, JSON.stringify(currentHistory, null, 2));
-
-    try {
-        console.log(`gemini.ts: Uploading image file [${imageFilePath}] to Gemini for [${senderId}]...`);
-        const uploadedFile = await aiClient.files.upload({
-            file: imageFilePath,
-            config: { mimeType: imageMimeType },
-        });
-        console.log(`gemini.ts: Image file uploaded for [${senderId}]. URI: ${uploadedFile.uri}, MIME Type: ${uploadedFile.mimeType}, Name: ${uploadedFile.name}`);
-
-        if (!uploadedFile.uri || typeof uploadedFile.uri !== 'string') {
-            console.error(`gemini.ts: Uploaded file response from Gemini is missing a valid URI for image [${senderId}].`);
-            return '';
-        }
-        if (!uploadedFile.mimeType || typeof uploadedFile.mimeType !== 'string') {
-            console.error(`gemini.ts: Uploaded file response from Gemini is missing a valid MIME type for image [${senderId}].`);
-            return '';
-        }
+        console.log(`gemini.ts: ${mediaType} file uploaded for [${senderId}]. URI: ${uploadedFile.uri}`);
 
         const messageContentToSend: Part[] = [
             createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
@@ -245,7 +173,7 @@ export async function processImageWithGemini(
         ];
         
         const userHistoryPartsToLog: ChatMessagePart[] = [
-            { fileData: { mimeType: imageMimeType, fileUri: uploadedFile.uri } },
+            { fileData: { mimeType: mimeType, fileUri: uploadedFile.uri } },
             { text: textPrompt }
         ];
 
@@ -258,41 +186,48 @@ export async function processImageWithGemini(
         );
 
         if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry);
-            currentHistory.push(modelHistoryEntry);
+            currentHistory.push(userHistoryEntry, modelHistoryEntry);
             chatHistories[senderId] = currentHistory;
-            console.log(`gemini.ts: Updated history for [${senderId}] after image processing:`, JSON.stringify(chatHistories[senderId], null, 2));
         }
         
         return modelResponseText;
 
     } catch (error) {
-        console.error(`gemini.ts: An error occurred while processing image with Gemini for [${senderId}]:`, error);
-        if (error instanceof Error) {
-            console.error(`  Error Type: ${error.constructor.name}`);
-            console.error(`  Error Name: ${error.name}`);
-            console.error(`  Error Message: ${error.message}`);
-            if (error.stack) {
-                console.error(`  Stack Trace:\n${error.stack}`);
-            }
-        } else {
-            console.error('  An unknown or non-standard error object was caught in image processing for [${senderId}]:', error);
-        }
-        return '';
-    } finally {
-        console.log(`gemini.ts: processImageWithGemini() function execution finished for [${senderId}].`);
+        console.error(`gemini.ts: Error processing ${mediaType} for [${senderId}]:`, error);
+        return `Sorry, I encountered an error trying to understand your ${mediaType.toLowerCase()}. Please try again later.`;
     }
 }
 
 /**
- * Processes a video file with Gemini using a fixed prompt, maintaining conversation history.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender.
- * @param videoFilePath Path to the local video file.
- * @param videoMimeType MIME type of the video file (e.g., "video/mp4").
- * @param textPrompt The fixed text prompt to send along with the video.
- * @param chatHistories An object storing chat histories for all users.
- * @returns A promise that resolves to the generated text response, or an empty string if an error occurs.
+ * Processes an audio file with Gemini by calling the generic media processor.
+ */
+export async function processAudioWithGemini(
+    aiClient: GoogleGenAI,
+    senderId: string,
+    audioFilePath: string,
+    audioMimeType: string,
+    textPrompt: string,
+    chatHistories: ChatHistories
+): Promise<string> {
+    return _processMediaWithGemini('Audio', aiClient, senderId, audioFilePath, audioMimeType, textPrompt, chatHistories);
+}
+
+/**
+ * Processes an image file with Gemini by calling the generic media processor.
+ */
+export async function processImageWithGemini(
+    aiClient: GoogleGenAI,
+    senderId: string,
+    imageFilePath: string,
+    imageMimeType: string,
+    textPrompt: string,
+    chatHistories: ChatHistories
+): Promise<string> {
+    return _processMediaWithGemini('Image', aiClient, senderId, imageFilePath, imageMimeType, textPrompt, chatHistories);
+}
+
+/**
+ * Processes a video file with Gemini by calling the generic media processor.
  */
 export async function processVideoWithGemini(
     aiClient: GoogleGenAI,
@@ -302,51 +237,11 @@ export async function processVideoWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories
 ): Promise<string> {
-    console.log(`gemini.ts: Entered processVideoWithGemini() for sender [${senderId}]. Video: ${videoFilePath}, Type: ${videoMimeType}, Prompt: "${textPrompt}"`);
-    const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
-    // Similar implementation to processImageWithGemini, adapted for video
-    try {
-        const uploadedFile = await aiClient.files.upload({ file: videoFilePath, config: { mimeType: videoMimeType } });
-        console.log(`gemini.ts: Video file uploaded for [${senderId}]. URI: ${uploadedFile.uri}, MIME Type: ${uploadedFile.mimeType}, Name: ${uploadedFile.name}`);
-        if (!uploadedFile.uri || typeof uploadedFile.uri !== 'string' || !uploadedFile.mimeType || typeof uploadedFile.mimeType !== 'string') {
-            console.error(`gemini.ts: Invalid uploaded file response for video [${senderId}].`); return '';
-        }
-        const messageContentToSend: Part[] = [createPartFromUri(uploadedFile.uri, uploadedFile.mimeType), { text: textPrompt }];
-        const userHistoryPartsToLog: ChatMessagePart[] = [{ fileData: { mimeType: videoMimeType, fileUri: uploadedFile.uri } }, { text: textPrompt }];
-        const { modelResponseText, userHistoryEntry, modelHistoryEntry } = await _performGeminiChatInteraction(aiClient, senderId, currentHistory, messageContentToSend, userHistoryPartsToLog);
-        if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry, modelHistoryEntry);
-            chatHistories[senderId] = currentHistory;
-            console.log(`gemini.ts: Updated history for [${senderId}] after video processing:`, JSON.stringify(chatHistories[senderId], null, 2));
-        }
-        return modelResponseText;
-    } catch (error) {
-        console.error(`gemini.ts: An error occurred while processing video with Gemini for [${senderId}]:`, error);
-        if (error instanceof Error) {
-            console.error(`  Error Type: ${error.constructor.name}`);
-            console.error(`  Error Name: ${error.name}`);
-            console.error(`  Error Message: ${error.message}`);
-            if (error.stack) {
-                console.error(`  Stack Trace:\n${error.stack}`);
-            }
-        } else {
-            console.error('  An unknown or non-standard error object was caught in video processing for [${senderId}]:', error);
-        }
-        return '';
-    } finally {
-        console.log(`gemini.ts: processVideoWithGemini() function execution finished for [${senderId}].`);
-    }
+    return _processMediaWithGemini('Video', aiClient, senderId, videoFilePath, videoMimeType, textPrompt, chatHistories);
 }
 
 /**
- * Processes a document file with Gemini using a fixed prompt, maintaining conversation history.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender.
- * @param documentFilePath Path to the local document file.
- * @param documentMimeType MIME type of the document file (e.g., "application/pdf").
- * @param textPrompt The fixed text prompt to send along with the document.
- * @param chatHistories An object storing chat histories for all users.
- * @returns A promise that resolves to the generated text response, or an empty string if an error occurs.
+ * Processes a document file with Gemini by calling the generic media processor.
  */
 export async function processDocumentWithGemini(
     aiClient: GoogleGenAI,
@@ -356,38 +251,5 @@ export async function processDocumentWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories
 ): Promise<string> {
-    console.log(`gemini.ts: Entered processDocumentWithGemini() for sender [${senderId}]. Document: ${documentFilePath}, Type: ${documentMimeType}, Prompt: "${textPrompt}"`);
-    const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
-    // Similar implementation to processImageWithGemini, adapted for document
-    try {
-        const uploadedFile = await aiClient.files.upload({ file: documentFilePath, config: { mimeType: documentMimeType } });
-        console.log(`gemini.ts: Document file uploaded for [${senderId}]. URI: ${uploadedFile.uri}, MIME Type: ${uploadedFile.mimeType}, Name: ${uploadedFile.name}`);
-        if (!uploadedFile.uri || typeof uploadedFile.uri !== 'string' || !uploadedFile.mimeType || typeof uploadedFile.mimeType !== 'string') {
-            console.error(`gemini.ts: Invalid uploaded file response for document [${senderId}].`); return '';
-        }
-        const messageContentToSend: Part[] = [createPartFromUri(uploadedFile.uri, uploadedFile.mimeType), { text: textPrompt }];
-        const userHistoryPartsToLog: ChatMessagePart[] = [{ fileData: { mimeType: documentMimeType, fileUri: uploadedFile.uri } }, { text: textPrompt }];
-        const { modelResponseText, userHistoryEntry, modelHistoryEntry } = await _performGeminiChatInteraction(aiClient, senderId, currentHistory, messageContentToSend, userHistoryPartsToLog);
-        if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry, modelHistoryEntry);
-            chatHistories[senderId] = currentHistory;
-            console.log(`gemini.ts: Updated history for [${senderId}] after document processing:`, JSON.stringify(chatHistories[senderId], null, 2));
-        }
-        return modelResponseText;
-    } catch (error) {
-        console.error(`gemini.ts: An error occurred while processing document with Gemini for [${senderId}]:`, error);
-        if (error instanceof Error) {
-            console.error(`  Error Type: ${error.constructor.name}`);
-            console.error(`  Error Name: ${error.name}`);
-            console.error(`  Error Message: ${error.message}`);
-            if (error.stack) {
-                console.error(`  Stack Trace:\n${error.stack}`);
-            }
-        } else {
-            console.error('  An unknown or non-standard error object was caught in document processing for [${senderId}]:', error);
-        }
-        return '';
-    } finally {
-        console.log(`gemini.ts: processDocumentWithGemini() function execution finished for [${senderId}].`);
-    }
+    return _processMediaWithGemini('Document', aiClient, senderId, documentFilePath, documentMimeType, textPrompt, chatHistories);
 } 

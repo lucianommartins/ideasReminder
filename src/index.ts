@@ -1,7 +1,16 @@
+/**
+ * @file index.ts
+ * @description This is the main entry point for the IdeasReminder application.
+ * It sets up an Express server to handle incoming WhatsApp messages via a Twilio webhook.
+ * The server processes text, audio, and other media messages, interacts with the
+ * Google Gemini API for conversational AI, and integrates with the Google Tasks API
+ * for task management. It also handles the OAuth2 flow for Google API authentication.
+ */
+
 // --- IMPORTS ---
 // For loading environment variables from a .env file
 import * as dotenv from 'dotenv';
-import express, { Request, Response } from 'express'; // Explicitly import Request, Response
+import express, { Request, Response, NextFunction } from 'express'; // Added NextFunction
 // Twilio SDK for sending WhatsApp messages
 import twilio from 'twilio';
 // Google Generative AI SDK for interacting with Gemini
@@ -14,6 +23,17 @@ import {
     processVideoWithGemini,
     processDocumentWithGemini
 } from './components/gemini';
+// Import Google Tasks utility functions
+import {
+    initiateGoogleAuth,
+    handleGoogleAuthCallback,
+    isUserAuthenticated,
+    clearUserTokens,
+    getAuthStatus,
+    listTaskLists,
+    getTasksInList,
+    createGoogleTask
+} from './components/gtasks';
 // Import chat history types with new English names
 import { ChatHistories } from './types/chat'; 
 import axios from 'axios'; // For downloading audio
@@ -34,8 +54,12 @@ console.log('index.ts: Environment variables loaded.');
 console.log('index.ts: Validating environment variables...');
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const FROM_NUMBER = process.env.FROM_NUMBER; // Correctly use FROM_NUMBER as specified
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = process.env.PORT || '3000'; // Default to port 3000 if not specified
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 
 if (!TWILIO_ACCOUNT_SID) {
     console.error('index.ts: FATAL ERROR - TWILIO_ACCOUNT_SID is not set. Application will exit.');
@@ -45,11 +69,51 @@ if (!TWILIO_AUTH_TOKEN) {
     console.error('index.ts: FATAL ERROR - TWILIO_AUTH_TOKEN is not set. Application will exit.');
     process.exit(1);
 }
+if (!FROM_NUMBER) {
+    console.error('index.ts: FATAL ERROR - FROM_NUMBER is not set. This is required for sending proactive messages. Application will exit.');
+    process.exit(1);
+}
 if (!GEMINI_API_KEY) {
     console.error('index.ts: FATAL ERROR - GEMINI_API_KEY is not set. Application will exit.');
     process.exit(1);
 }
+if (!GOOGLE_CLIENT_ID) {
+    console.error('index.ts: FATAL ERROR - GOOGLE_CLIENT_ID is not set. Application will exit.');
+    process.exit(1);
+}
+if (!GOOGLE_CLIENT_SECRET) {
+    console.error('index.ts: FATAL ERROR - GOOGLE_CLIENT_SECRET is not set. Application will exit.');
+    process.exit(1);
+}
+if (!GOOGLE_REDIRECT_URI) {
+    console.error('index.ts: FATAL ERROR - GOOGLE_REDIRECT_URI is not set. Application will exit.');
+    process.exit(1);
+}
 console.log('index.ts: Environment variables validated successfully.');
+
+// --- DYNAMIC SERVER BASE URL ---
+// This logic derives the server's public-facing base URL from the GOOGLE_REDIRECT_URI.
+// This is crucial for ensuring that links sent to users (like for OAuth) use the correct public URL (e.g., from ngrok).
+let SERVER_BASE_URL: string;
+try {
+    // We assume GOOGLE_REDIRECT_URI is something like 'https://[your-ngrok-url]/auth/google/callback'
+    // The .origin property will correctly extract 'https://[your-ngrok-url]'
+    const redirectUrl = new URL(GOOGLE_REDIRECT_URI!);
+    SERVER_BASE_URL = redirectUrl.origin;
+    console.log(`index.ts: SERVER_BASE_URL dynamically set from GOOGLE_REDIRECT_URI: ${SERVER_BASE_URL}`);
+} catch (error) {
+    console.error('index.ts: Invalid GOOGLE_REDIRECT_URI format. Could not parse to determine SERVER_BASE_URL.');
+    console.error('index.ts: Please ensure GOOGLE_REDIRECT_URI is a full, valid URL (e.g., "https://example.com/callback").');
+    // Fallback or exit if this is critical
+    console.log(`index.ts: Falling back to default SERVER_BASE_URL: http://localhost:${PORT}`);
+    SERVER_BASE_URL = `http://localhost:${PORT}`;
+}
+
+// --- TWILIO CLIENT INITIALIZATION ---
+// Initialize the main Twilio client for sending proactive messages
+console.log('index.ts: Initializing Twilio client...');
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+console.log('index.ts: Twilio client initialized successfully.');
 
 // --- GEMINI API CLIENT INITIALIZATION ---
 console.log('index.ts: Initializing GoogleGenAI client...');
@@ -127,6 +191,67 @@ const FIXED_TEXT_PROMPT_FOR_IMAGE = "Describe this image and answer any question
 const FIXED_TEXT_PROMPT_FOR_VIDEO = "Summarize this video and answer any question it might contain.";
 const FIXED_TEXT_PROMPT_FOR_DOCUMENT = "Summarize this document and answer any question it might contain.";
 
+// --- GOOGLE AUTH ROUTES ---
+// Route to initiate Google OAuth flow
+app.get('/auth/google/initiate', (req: Request, res: Response) => {
+    const senderId = req.query.senderId as string;
+    if (!senderId) {
+        console.error("index.ts: /auth/google/initiate called without a senderId.");
+        return res.status(400).send('Authentication failed: Missing user identifier.');
+    }
+    // This function is synchronous, so no need for async/await or try/catch here.
+    const authUrl = initiateGoogleAuth(senderId);
+    res.redirect(authUrl);
+});
+
+// Callback route for Google OAuth
+app.get('/auth/google/callback', async (req: Request, res: Response) => {
+    const { code, state: senderId, error: errorQueryParam } = req.query;
+
+    if (errorQueryParam) {
+        console.error(`index.ts: /auth/google/callback error from Google: ${errorQueryParam} for senderId [${senderId}].`);
+        return res.status(400).send(`<html><body><h1>Authentication Failed</h1><p>Google authentication failed: ${errorQueryParam}. You can close this page.</p></body></html>`);
+    }
+
+    if (!code || typeof code !== 'string' || !senderId || typeof senderId !== 'string') {
+        console.error("index.ts: /auth/google/callback called with missing code or state.", { query: req.query });
+        return res.status(400).send('Authentication failed: Missing authorization code or user identifier.');
+    }
+
+    try {
+        await handleGoogleAuthCallback(code, senderId);
+        
+        // --- Send proactive success message to user on WhatsApp ---
+        console.log(`index.ts: Attempting to send proactive auth success message to [${senderId}].`);
+        try {
+            await twilioClient.messages.create({
+                body: '✅ Authentication with Google Tasks was successful! You can now use task-related commands.',
+                from: FROM_NUMBER!,
+                to: senderId
+            });
+            console.log(`index.ts: Proactive message sent successfully to [${senderId}].`);
+        } catch (twilioError) {
+            console.error(`index.ts: FAILED to send proactive success message to [${senderId}].`, twilioError);
+        }
+        
+        // --- Display a user-friendly success page in the browser ---
+        res.send(`
+            <html>
+                <head><title>Authentication Successful</title></head>
+                <body>
+                    <h1>Google Tasks Authentication Successful!</h1>
+                    <p>Your account for WhatsApp user ${senderId} has been successfully linked with Google Tasks.</p>
+                    <p>You can now close this page and return to WhatsApp.</p>
+                </body>
+            </html>
+        `);
+        
+    } catch (error) {
+        console.error(`index.ts: Error during Google OAuth callback for sender [${senderId}]:`, error);
+        res.status(500).send('<html><body><h1>Authentication Error</h1><p>An error occurred while authenticating with Google. Please try again. You can close this page.</p></body></html>');
+    }
+});
+
 app.post('/webhook/twilio', async (req: Request, res: Response) => {
     console.log('index.ts: POST /webhook/twilio - Request received.');
     const { MessagingResponse } = twilio.twiml;
@@ -181,28 +306,26 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
 
                     if (supportedAudioTypes.includes(mediaContentType)) {
                         effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_AUDIO;
-                        console.log(`index.ts: Processing downloaded audio [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        console.log(`index.ts: Processing downloaded audio for [${senderId}]. Prompt: "${effectivePrompt}"`);
                         geminiMediaResponse = await processAudioWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
                     } else if (supportedImageTypes.includes(mediaContentType)) {
                         effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_IMAGE;
-                        console.log(`index.ts: Processing downloaded image [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        console.log(`index.ts: Processing downloaded image for [${senderId}]. Prompt: "${effectivePrompt}"`);
                         geminiMediaResponse = await processImageWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
                     } else if (supportedVideoTypes.includes(mediaContentType)) {
                         effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_VIDEO;
-                        console.log(`index.ts: Processing downloaded video [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        console.log(`index.ts: Processing downloaded video for [${senderId}]. Prompt: "${effectivePrompt}"`);
                         geminiMediaResponse = await processVideoWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
                     } else if (supportedDocumentTypes.includes(mediaContentType)) {
                         effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_DOCUMENT;
-                        console.log(`index.ts: Processing downloaded document [${localMediaFilePath}] with Gemini for [${senderId}]. Prompt: "${effectivePrompt}"`);
+                        console.log(`index.ts: Processing downloaded document for [${senderId}]. Prompt: "${effectivePrompt}"`);
                         geminiMediaResponse = await processDocumentWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories);
                     } else {
                         console.warn(`index.ts: User [${senderId}] sent an unsupported media file type: ${mediaContentType}.`);
                         twiml.message("The media file type you sent is not currently supported. Please try an image, audio, video, or a common document format (PDF, DOCX, PPTX, XLSX).");
-                        // No further processing for unsupported types, twiml message is set.
                     }
 
                     if (geminiMediaResponse === undefined && !twiml.response.children.length) {
-                        // This case handles if a supported type was routed but the processing function (once implemented) failed to return a response.
                         geminiMediaResponse = "I received your media, but I couldn't formulate a response right now. Please try again.";
                         console.warn(`index.ts: Gemini media processing for a supported type returned an empty/undefined response for [${senderId}]. Using fallback message.`);
                     }
@@ -240,13 +363,118 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
             console.warn(`index.ts: Missing Body (text content) for message from [${senderId}]. Sending generic reply.`);
             twiml.message("Thanks for your message! If you meant to send text, please try again, or send an audio message.");
         } else {
-            let geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
-            console.log(`index.ts: Gemini chat response for [${senderId}]: "${geminiResponseText}"`);
-            if (!geminiResponseText) {
-                geminiResponseText = "I'm having a little trouble thinking right now. Please try again in a moment!";
-                console.warn(`index.ts: Gemini chat returned an empty response for [${senderId}]. Using fallback message.`);
+            // Normalize message for easier command parsing
+            const lowerCaseMsg = incomingMsg.toLowerCase().trim();
+
+            if (lowerCaseMsg === '/connect_google_tasks') {
+                console.log(`index.ts: Received /connect_google_tasks command from [${senderId}].`);
+                
+                if (isUserAuthenticated(senderId)) {
+                    console.log(`index.ts: User [${senderId}] is already authenticated. Informing the user.`);
+                    twiml.message("You are already connected to Google Tasks. You can start using commands like '/list_task_lists'.\n\nIf you want to connect a different account, first disconnect the current one using the command: /disconnect_google_tasks");
+                } else {
+                    console.log(`index.ts: User [${senderId}] is not authenticated. Generating auth URL.`);
+                    const initiationUrl = `${SERVER_BASE_URL}/auth/google/initiate?senderId=${encodeURIComponent(senderId)}`;
+                    
+                    console.log(`index.ts: Sending rich auth initiation message to [${senderId}].`);
+                    twiml.message("To connect your Google Tasks account, please open this link in your browser:");
+                    twiml.message(initiationUrl);
+                    twiml.message("After authorizing, you can use commands like '/list_task_lists'.");
+                }
+            
+            } else if (lowerCaseMsg === '/disconnect_google_tasks') {
+                console.log(`index.ts: Received /disconnect_google_tasks command from [${senderId}].`);
+                const cleared = clearUserTokens(senderId);
+                if (cleared) {
+                    twiml.message('Your Google Tasks account has been disconnected. Your tokens have been cleared.');
+                } else {
+                    twiml.message('No active Google Tasks connection found to disconnect.');
+                }
+            
+            } else if (lowerCaseMsg === '/status_google_tasks') {
+                console.log(`index.ts: Received /status_google_tasks command from [${senderId}].`);
+                const statusMessage = getAuthStatus(senderId);
+                twiml.message(statusMessage);
+
+            } else if (lowerCaseMsg === '/list_task_lists') {
+                console.log(`index.ts: Received /list_task_lists command from [${senderId}].`);
+                const taskListsResponse = await listTaskLists(senderId);
+                if (typeof taskListsResponse === 'string') {
+                    twiml.message(taskListsResponse);
+                } else if (!taskListsResponse || taskListsResponse.length === 0) {
+                    twiml.message('You have no Google Task lists, or I couldn\'t find them. Ensure you are connected with /connect_google_tasks.');
+                } else {
+                    let message = 'Your Google Task Lists:\n';
+                    taskListsResponse.forEach(list => {
+                        message += `- ${list.title} (ID: ${list.id || 'N/A'})\n`;
+                    });
+                    message += '\nTo see tasks in a list, use: /show_tasks <list_ID_or_title>';
+                    twiml.message(message.trim());
+                }
+            
+            } else if (lowerCaseMsg.startsWith('/show_tasks')) {
+                const parts = incomingMsg.trim().split(' ');
+                const taskListIdentifier = parts.length > 1 ? parts.slice(1).join(' ') : '@default';
+                console.log(`index.ts: Received /show_tasks command for list [${taskListIdentifier}] from [${senderId}].`);
+                
+                const tasksResponse = await getTasksInList(senderId, taskListIdentifier);
+                if (typeof tasksResponse === 'string') {
+                    twiml.message(tasksResponse);
+                } else if (!tasksResponse || tasksResponse.length === 0) {
+                    twiml.message(`No tasks found in list "${taskListIdentifier === '@default' ? 'Default List' : taskListIdentifier}".`);
+                } else {
+                    let message = `Tasks in "${taskListIdentifier === '@default' ? 'Default List' : taskListIdentifier}":\n`;
+                    tasksResponse.forEach(task => {
+                        message += `- ${task.title}${task.notes ? ` (Notes: ${task.notes})` : ''}${task.status === 'completed' ? ' [DONE]' : ''}\n`;
+                    });
+                    twiml.message(message.trim());
+                }
+
+            } else if (lowerCaseMsg.startsWith('/add_task')) {
+                const commandParts = incomingMsg.trim().split(' ');
+                const taskTitle = commandParts.slice(1).join(' ').trim();
+                const taskListId = '@default'; // Add to the default list by default.
+
+                console.log(`index.ts: Received /add_task command with title "${taskTitle}" for list [${taskListId}] from [${senderId}].`);
+                if (!taskTitle) {
+                    twiml.message('Please provide a title for the task. Usage: /add_task Your task title here');
+                } else {
+                    const creationResponse = await createGoogleTask(senderId, taskTitle, taskListId);
+                    if (typeof creationResponse === 'string') {
+                        twiml.message(creationResponse);
+                    } else {
+                        twiml.message(`Task "${creationResponse.title}" created successfully in your default Google Tasks list!`);
+                    }
+                }
+            } else {
+                // If the message starts with '/' it's an attempt at a command that we don't recognize.
+                if (incomingMsg.trim().startsWith('/')) {
+                    const commandList = `
+Invalid command. Please use one of the available commands:
+
+• */connect_google_tasks* - Connect your Google Tasks account.
+• */disconnect_google_tasks* - Disconnect your Google Tasks account.
+• */status_google_tasks* - Check the status and expiry of your connection.
+• */list_task_lists* - Show all your task lists.
+• */show_tasks <list_name>* - Show tasks from a specific list (use "@default" for the default list).
+• */add_task <task_description>* - Add a new task to your default list.
+
+Any other message (not starting with /) will be treated as a conversation with the AI.
+                    `.trim().replace(/^ +/gm, ''); // Trim and remove leading spaces from each line
+
+                    twiml.message(commandList);
+                } else {
+                    // Default to Gemini chat if no command recognized and doesn't start with /
+                    console.log(`index.ts: No command recognized. Passing to Gemini for sender [${senderId}].`);
+                    let geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
+                    console.log(`index.ts: Gemini chat response for [${senderId}]: "${geminiResponseText}"`);
+                    if (!geminiResponseText) {
+                        geminiResponseText = "I'm having a little trouble thinking right now. Please try again in a moment!";
+                        console.warn(`index.ts: Gemini chat returned an empty response for [${senderId}]. Using fallback message.`);
+                    }
+                    twiml.message(geminiResponseText);
+                }
             }
-            twiml.message(geminiResponseText);
         }
     }
 
@@ -257,5 +485,8 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
 
 // --- START EXPRESS SERVER ---
 app.listen(PORT, () => {
-    console.log(`index.ts: Express server started and listening on port ${PORT}. Webhook is available at /webhook/twilio`);
+    console.log(`index.ts: Express server started and listening on port ${PORT}.`);
+    console.log(`index.ts: Twilio webhook endpoint available at /webhook/twilio`);
+    console.log(`index.ts: Google OAuth initiation route available at ${SERVER_BASE_URL}/auth/google/initiate?senderId=YOUR_SENDER_ID`);
+    console.log(`index.ts: Google OAuth callback configured for ${GOOGLE_REDIRECT_URI}`);
 }); 
