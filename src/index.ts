@@ -87,27 +87,27 @@ if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 const sendWelcomeMessage = (twiml: twilio.twiml.MessagingResponse) => {
     console.log("index.ts: Sending welcome message.");
     const welcomeText = `
-👋 Olá! Eu sou o *VoiceTasks*, seu assistente pessoal para o Google Tasks! 📝
+👋 Hello! I'm *VoiceTasks*, your personal assistant for Google Tasks! 📝
 
-Comigo, você pode transformar suas ideias em tarefas, seja por texto, áudio ou até imagens, diretamente aqui no WhatsApp.
+With me, you can turn your ideas into tasks—whether by text, audio, or even images—directly here on WhatsApp.
 
-*Aqui estão os comandos que você pode usar:*
+*Here are the commands you can use:*
 
-🤖 *Conversa Geral:*
-- Qualquer mensagem que não comece com \`/\` inicia uma conversa com a IA.
+🤖 *General Conversation:*
+- Any message that doesn't start with \`/\` begins a conversation with the AI.
 
-🔗 *Conexão com o Google Tasks:*
-- \`/connect_google_tasks\`: Conecte sua conta do Google Tasks.
-- \`/disconnect_google_tasks\`: Desconecte sua conta.
-- \`/status_google_tasks\`: Verifique o status da sua conexão.
+🔗 *Connecting to Google Tasks:*
+- \`/connect_google_tasks\`: Connect your Google Tasks account.
+- \`/disconnect_google_tasks\`: Disconnect your account.
+- \`/status_google_tasks\`: Check your connection status.
 
-📋 *Gerenciamento de Tarefas:*
-- \`/list_task_lists\`: Veja todas as suas listas de tarefas.
-- \`/show_tasks <nome_da_lista>\`: Mostra tarefas de uma lista específica.
-- \`/add_task <descrição_da_tarefa>\`: Adiciona uma nova tarefa à sua lista padrão.
+📋 *Task Management:*
+- \`/list_task_lists\`: See all your task lists.
+- \`/show_tasks <list_name>\`: Show tasks from a specific list.
+- \`/add_task <task_description>\`: Add a new task to your default list.
 
-💡 *Como posso ajudar você hoje?*
-Envie uma ideia, um áudio, ou use um dos comandos acima para começar!
+💡 *How can I help you today?*
+Send an idea, an audio message, or use one of the commands above to get started!
     `.trim().replace(/^ +/gm, ''); // This ensures the formatting is neat in WhatsApp.
 
     twiml.message(welcomeText);
