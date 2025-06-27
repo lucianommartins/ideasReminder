@@ -10,7 +10,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { tasks_v1, google } from 'googleapis'; // For Tasks API
 import fs from 'fs'; // Node.js File System module
 import path from 'path'; // Node.js Path module
-import { UserTokens, StoredToken } from '../types/chat';
+import { UserTokens, StoredToken, IdentifiedTask } from '../types/chat';
 
 // --- CONSTANTS ---
 const DATA_DIR = path.resolve(__dirname, '..', 'data'); // Resolves to <project_root>/src/data
@@ -241,34 +241,80 @@ export async function getTasksInList(senderId: string, tasklistId: string = '@de
 }
 
 /**
- * Creates a new task in the user's default task list.
+ * Creates a new, detailed task in the user's default task list.
  * @param senderId The user's identifier.
- * @param title The title of the task to create.
+ * @param taskDetails The structured task details from Gemini.
  * @param tasklistId The ID of the task list where the task will be added. Defaults to '@default'.
  * @returns A promise that resolves to the created task object or an error message string for user display.
  */
 export async function createGoogleTask(
     senderId: string,
-    title: string,
+    taskDetails: IdentifiedTask['details'],
     tasklistId: string = '@default'
 ): Promise<tasks_v1.Schema$Task | string> {
     try {
-        if (!title || title.trim() === "") {
-            return "Task title cannot be empty.";
-        }
         const oauth2Client = await getAuthenticatedClient(senderId);
         const tasksService = google.tasks({ version: 'v1', auth: oauth2Client });
 
+        // --- Task Timing & Recurrence ---
+        // Set the timezone for the task. IMPORTANT: This is a fixed timezone.
+        // The bot cannot know the user's local timezone automatically.
+        const TIMEZONE = 'America/Sao_Paulo';
+
+        // Calculate the due date: Tomorrow at 9 AM in the specified timezone.
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(9, 0, 0, 0);
+
+        // Format for Google Tasks API (RFC 3339 timestamp).
+        // We need to construct the date string manually to ensure the correct timezone offset.
+        // The toISOString() method always uses UTC (Z), which we don't want here.
+        // A library like date-fns-tz would be ideal, but to keep dependencies low, we do it manually.
+        // This is a simplified approach. For full accuracy across all timezones and DST changes,
+        // a dedicated library would be better.
+        const offset = new Date().getTimezoneOffset() / -60; // Example for manual offset
+        const pad = (num: number) => (num < 10 ? '0' : '') + num;
+        const dueDateTime = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}T${pad(tomorrow.getHours())}:${pad(tomorrow.getMinutes())}:${pad(tomorrow.getSeconds())}.000${offset >= 0 ? '+' : '-'}${pad(Math.abs(offset))}:00`;
+
+        const recurrenceRule = 'RRULE:FREQ=DAILY;COUNT=3'; // Repeat daily for 3 days.
+
+        // --- Construct Task Body ---
+        // Combine the structured details into a comprehensive task description.
+        const notes = `
+Description: ${taskDetails.description}
+
+Expected Result: ${taskDetails.final_result}
+
+User Experience: ${taskDetails.user_experience}
+        `.trim();
+
+        const taskRequestBody: tasks_v1.Schema$Task = {
+            title: taskDetails.objective,
+            notes: notes,
+            due: dueDateTime,
+        };
+
+        // Dynamically add reminders to bypass strict TypeScript type checking for this field.
+        (taskRequestBody as any).reminders = {
+            useDefault: false,
+            overrides: [
+                { method: 'popup', minutes: 10 } // 10-minute reminder before due time
+            ]
+        };
+        
+        // Similarly, adding recurrence dynamically.
+        // Note: As of the current library version, recurrence might not be officially typed.
+        // (taskRequestBody as any).recurrence = [recurrenceRule];
+
         const response = await tasksService.tasks.insert({
             tasklist: tasklistId,
-            requestBody: {
-                title: title.trim(),
-            },
+            requestBody: taskRequestBody,
         });
+
         return response.data;
     } catch (error: any) {
-        console.error(`gtasks.ts: Error creating task "${title}" for [${senderId}]:`, error.message);
-        return `Error creating Google Task: ${error.message}`;
+        console.error(`gtasks.ts: Error creating task for [${senderId}]:`, error.message);
+        return `Sorry, I couldn't create the task in Google Tasks. Error: ${error.message}`;
     }
 }
 

@@ -15,7 +15,7 @@ import fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import axios from 'axios';
 import { GoogleGenAI } from '@google/genai';
-import { ChatHistories } from './types/chat';
+import { ChatHistories, IdentifiedTask } from './types/chat';
 import { 
     processAudioWithGemini, 
     processImageWithGemini,
@@ -89,25 +89,21 @@ const sendWelcomeMessage = (twiml: twilio.twiml.MessagingResponse) => {
     const welcomeText = `
 👋 Hello! I'm *VoiceTasks*, your personal assistant for Google Tasks! 📝
 
-With me, you can turn your ideas into tasks—whether by text, audio, or even images—directly here on WhatsApp.
+With me, you can turn your ideas into tasks—whether by text, audio, or even images—directly here on WhatsApp. Just describe what you need, and I'll handle the rest.
 
-*Here are the commands you can use:*
+*Here are the main commands:*
 
 🤖 *General Conversation:*
-- Any message that doesn't start with \`/\` begins a conversation with the AI.
+- Any message that doesn't start with \`/\` begins a conversation with the AI. Just chat naturally!
 
 🔗 *Connecting to Google Tasks:*
 - \`/connect_google_tasks\`: Connect your Google Tasks account.
 - \`/disconnect_google_tasks\`: Disconnect your account.
 - \`/status_google_tasks\`: Check your connection status.
-
-📋 *Task Management:*
-- \`/list_task_lists\`: See all your task lists.
-- \`/show_tasks <list_name>\`: Show tasks from a specific list.
-- \`/add_task <task_description>\`: Add a new task to your default list.
+- \`/help\` or \`/start\`: Show this welcome message again.
 
 💡 *How can I help you today?*
-Send an idea, an audio message, or use one of the commands above to get started!
+Send an idea or an audio message, and let's get it done!
     `.trim().replace(/^ +/gm, ''); // This ensures the formatting is neat in WhatsApp.
 
     twiml.message(welcomeText);
@@ -313,56 +309,6 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
                 const statusMessage = getAuthStatus(senderId);
                 twiml.message(statusMessage);
 
-            } else if (lowerCaseMsg === '/list_task_lists') {
-                console.log(`index.ts: Received /list_task_lists command from [${senderId}].`);
-                const taskListsResponse = await listTaskLists(senderId);
-                if (typeof taskListsResponse === 'string') {
-                    twiml.message(taskListsResponse);
-                } else if (!taskListsResponse || taskListsResponse.length === 0) {
-                    twiml.message('You have no Google Task lists, or I couldn\'t find them. Ensure you are connected with /connect_google_tasks.');
-                } else {
-                    let message = 'Your Google Task Lists:\n';
-                    taskListsResponse.forEach(list => {
-                        message += `- ${list.title} (ID: ${list.id || 'N/A'})\n`;
-                    });
-                    message += '\nTo see tasks in a list, use: /show_tasks <list_ID_or_title>';
-                    twiml.message(message.trim());
-                }
-            
-            } else if (lowerCaseMsg.startsWith('/show_tasks')) {
-                const parts = incomingMsg.trim().split(' ');
-                const taskListIdentifier = parts.length > 1 ? parts.slice(1).join(' ') : '@default';
-                console.log(`index.ts: Received /show_tasks command for list [${taskListIdentifier}] from [${senderId}].`);
-                
-                const tasksResponse = await getTasksInList(senderId, taskListIdentifier);
-                if (typeof tasksResponse === 'string') {
-                    twiml.message(tasksResponse);
-                } else if (!tasksResponse || tasksResponse.length === 0) {
-                    twiml.message(`No tasks found in list "${taskListIdentifier === '@default' ? 'Default List' : taskListIdentifier}".`);
-                } else {
-                    let message = `Tasks in "${taskListIdentifier === '@default' ? 'Default List' : taskListIdentifier}":\n`;
-                    tasksResponse.forEach(task => {
-                        message += `- ${task.title}${task.notes ? ` (Notes: ${task.notes})` : ''}${task.status === 'completed' ? ' [DONE]' : ''}\n`;
-                    });
-                    twiml.message(message.trim());
-                }
-
-            } else if (lowerCaseMsg.startsWith('/add_task')) {
-                const commandParts = incomingMsg.trim().split(' ');
-                const taskTitle = commandParts.slice(1).join(' ').trim();
-                const taskListId = '@default'; // Add to the default list by default.
-
-                console.log(`index.ts: Received /add_task command with title "${taskTitle}" for list [${taskListId}] from [${senderId}].`);
-                if (!taskTitle) {
-                    twiml.message('Please provide a title for the task. Usage: /add_task Your task title here');
-                } else {
-                    const creationResponse = await createGoogleTask(senderId, taskTitle, taskListId);
-                    if (typeof creationResponse === 'string') {
-                        twiml.message(creationResponse);
-                    } else {
-                        twiml.message(`Task "${creationResponse.title}" created successfully in your default Google Tasks list!`);
-                    }
-                }
             } else if (lowerCaseMsg === '/help' || lowerCaseMsg === '/start') {
                 console.log(`index.ts: Received /help or /start command from [${senderId}]. Resending welcome message.`);
                 sendWelcomeMessage(twiml);
@@ -375,9 +321,6 @@ Invalid command. Please use one of the available commands:
 • */connect_google_tasks* - Connect your Google Tasks account.
 • */disconnect_google_tasks* - Disconnect your Google Tasks account.
 • */status_google_tasks* - Check the status and expiry of your connection.
-• */list_task_lists* - Show all your task lists.
-• */show_tasks <list_name>* - Show tasks from a specific list (use "@default" for the default list).
-• */add_task <task_description>* - Add a new task to your default list.
 • */help* or */start* - Show this welcome message again.
 
 Any other message (not starting with /) will be treated as a conversation with the AI.
@@ -391,13 +334,53 @@ Any other message (not starting with /) will be treated as a conversation with t
                     }
                     // Default to Gemini chat if no command recognized and doesn't start with /
                     console.log(`index.ts: No command recognized. Passing to Gemini for sender [${senderId}].`);
-                    let geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
-                    console.log(`index.ts: Gemini chat response for [${senderId}]: "${geminiResponseText}"`);
-                    if (!geminiResponseText) {
-                        geminiResponseText = "I'm having a little trouble thinking right now. Please try again in a moment!";
-                        console.warn(`index.ts: Gemini chat returned an empty response for [${senderId}]. Using fallback message.`);
+                    const geminiResponseText = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories);
+                    
+                    console.log(`index.ts: Raw response from Gemini for [${senderId}]: "${geminiResponseText}"`);
+
+                    try {
+                        // Attempt to parse the response as JSON. If it's a task, it will be a valid JSON object.
+                        // If it's a regular chat message, this will fail and we'll catch the error.
+                        const parsedJson = JSON.parse(geminiResponseText);
+
+                        // Check if the parsed object looks like our IdentifiedTask structure.
+                        if (parsedJson && parsedJson.isTask === true && parsedJson.details) {
+                            console.log(`index.ts: Gemini identified a task for [${senderId}].`);
+                            const taskDetails = (parsedJson as IdentifiedTask).details;
+
+                            // Check if user is authenticated with Google before proceeding.
+                            if (!isUserAuthenticated(senderId)) {
+                                console.log(`index.ts: User [${senderId}] tried to create a task but is not authenticated.`);
+                                twiml.message("I've structured your task, but you need to connect your Google account first. Please use the command `/connect_google_tasks` and then send your task request again.");
+                            } else {
+                                console.log(`index.ts: Creating Google Task for [${senderId}].`);
+                                const creationResponse = await createGoogleTask(senderId, taskDetails);
+
+                                if (typeof creationResponse === 'string') {
+                                    // If createGoogleTask returned an error message string
+                                    twiml.message(creationResponse);
+                                } else {
+                                    // Success!
+                                    const successMessage = `✅ Task created successfully!\n\n*${creationResponse.title}* has been added to your Google Tasks and is scheduled for tomorrow at 9 AM.`;
+                                    twiml.message(successMessage);
+                                    console.log(`index.ts: Successfully created task titled "${creationResponse.title}" for [${senderId}].`);
+                                }
+                            }
+                        } else {
+                             // The JSON was valid but wasn't in the task format. Treat as regular text.
+                            console.log(`index.ts: Gemini response was valid JSON but not a task for [${senderId}]. Treating as text.`);
+                            twiml.message(geminiResponseText);
+                        }
+                    } catch (error) {
+                        // JSON.parse failed, which means it's a regular string chat response.
+                        console.log(`index.ts: Gemini response for [${senderId}] was not JSON. Treating as a standard chat message.`);
+                        if (!geminiResponseText) {
+                            twiml.message("I'm having a little trouble thinking right now. Please try again in a moment!");
+                            console.warn(`index.ts: Gemini chat returned an empty response for [${senderId}]. Using fallback message.`);
+                        } else {
+                            twiml.message(geminiResponseText);
+                        }
                     }
-                    twiml.message(geminiResponseText);
                 }
             }
         }

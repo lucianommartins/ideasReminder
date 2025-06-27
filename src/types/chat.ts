@@ -27,6 +27,22 @@ export interface ChatHistoryItem {
 // The key is the senderId (string), and the value is an array of ChatHistoryItem
 export type ChatHistories = Record<string, ChatHistoryItem[]>;
 
+// --- Types for Task Identification ---
+
+/**
+ * Represents the structured details of a task identified by the Gemini model.
+ * This is the structure the model is prompted to return as JSON.
+ */
+export interface IdentifiedTask {
+    isTask: true;
+    details: {
+        objective: string;      // The main, concise goal of the task.
+        description: string;    // A more detailed description.
+        final_result: string;   // The expected outcome or deliverable.
+        user_experience: string // How this task impacts the user experience.
+    };
+}
+
 // --- Types for Google API Tokens ---
 
 /**

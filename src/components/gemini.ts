@@ -10,11 +10,55 @@ import { GoogleGenAI, createPartFromUri, Part } from "@google/genai";
 import { ChatHistoryItem, ChatHistories, ChatMessagePart } from "../types/chat";
 
 /**
- * System-level instructions to prime the Gemini model for consistent behavior.
- * This instruction ensures the model always replies in the same language as the user.
+ * System-level instructions to prime the Gemini model for its role as a task identifier.
  */
-const LANGUAGE_PRIMING_USER = "IMPORTANT: From now on, you MUST respond in the exact same language I use. If I use Portuguese, you respond in Portuguese. If I use English, you respond in English. Do not translate unless I explicitly ask you to.";
-const LANGUAGE_PRIMING_MODEL = "Understood. I will always respond in the same language as your message.";
+const systemInstruction = `
+Your primary role is to be a world-class assistant for identifying and structuring tasks from user messages.
+
+You have two modes of operation:
+1. "Task Identification Mode": If the user's message implies they want to create a task, a to-do, a reminder, or any actionable item.
+2. "Normal Chat Mode": For any other type of conversation.
+
+**Rules for Task Identification Mode:**
+- If you determine the user wants to create a task, you MUST respond ONLY with a valid JSON object. Do not include any other text, greetings, or explanations before or after the JSON.
+- The JSON object must have the exact following structure:
+  {
+    "isTask": true,
+    "details": {
+      "objective": "A concise, clear title for the task. (e.g., 'Develop new login page')",
+      "description": "A detailed breakdown of the task requirements. (e.g., 'Create a responsive login page with email/password fields and a Google sign-in button.')",
+      "final_result": "The expected outcome when the task is complete. (e.g., 'A fully functional and tested login page deployed to the staging environment.')",
+      "user_experience": "How this task benefits the end-user. (e.g., 'Users will have a modern, secure, and easy way to access their accounts.')"
+    }
+  }
+- You must infer and populate all four fields in the "details" object from the user's message. If the user is vague, use your reasoning to create a logical structure based on what they provided.
+
+**Rules for Normal Chat Mode:**
+- If the message is NOT a task request (e.g., it's a greeting, a question, a random statement), you must respond as a friendly, helpful assistant.
+- Your response in this mode MUST be a simple string.
+- Do NOT use JSON in this mode.
+
+**Language Priming:**
+- IMPORTANT: You MUST respond in the exact same language the user uses. If they use Portuguese, you respond in Portuguese (for both chat and the content of the JSON fields). If they use English, you respond in English.
+
+Example 1 (Task in English):
+User: "hey can you remind me to build that new feature for the homepage? it needs to be a carousel that shows trending products"
+Your response:
+{
+  "isTask": true,
+  "details": {
+    "objective": "Develop new homepage carousel feature",
+    "description": "Build and implement a product carousel on the homepage to display trending products.",
+    "final_result": "A functional carousel on the live homepage, dynamically showing the latest trending products.",
+    "user_experience": "Customers will easily discover and engage with trending products, increasing sales."
+  }
+}
+
+Example 2 (Chat in Portuguese):
+User: "oi, tudo bem?"
+Your response:
+"Olá! Tudo bem por aqui. Como posso te ajudar hoje?"
+`.trim();
 
 export const FIXED_TEXT_PROMPT_FOR_AUDIO = "Transcribe this audio. If it's music, identify the song and artist.";
 export const FIXED_TEXT_PROMPT_FOR_IMAGE = "Describe this image in detail.";
@@ -46,26 +90,22 @@ async function _performGeminiChatInteraction(
     messageContentToSend: string | Part[],
     userHistoryPartsToLog: ChatMessagePart[]
 ): Promise<GeminiChatInteractionResult> {
-    // Create a temporary history for this specific API call to avoid mutating the stored history.
-    const historyForThisTurn = [...currentHistoryForUser];
-
-    // Prepend the language priming instruction to the start of the conversation history.
-    // This ensures Gemini always gets the instruction to reply in the user's language.
-    // We prepend it every time to a temporary copy, so the actual stored history remains clean.
-    historyForThisTurn.unshift(
-        { role: "model", parts: [{ text: LANGUAGE_PRIMING_MODEL }] },
-        { role: "user", parts: [{ text: LANGUAGE_PRIMING_USER }] }
-    );
+    // We no longer use the stored history directly for the turn, as the system prompt guides the model.
+    // History can still be valuable for context but is managed differently.
+    // For this implementation, we simplify and focus on the single-turn instruction.
     
-    console.log(`gemini.ts_internal: Creating/continuing chat session for [${senderId}] with model gemini-2.5-flash.`);
+    console.log(`gemini.ts_internal: Starting a new chat session for [${senderId}] with model gemini-2.5-flash.`);
     const chat = aiClient.chats.create({
         model: "gemini-2.5-flash",
-        history: historyForThisTurn,
+        // The system instruction is now the primary guide for the model's behavior.
+        systemInstruction: {
+            role: "system",
+            parts: [{ text: systemInstruction }]
+        },
         config: {
-            thinkingConfig: {
-                thinkingBudget: 0,
-            },
-            tools: [{ googleSearch: {} }],
+            // Ensure the model outputs JSON when requested by setting the response MIME type.
+            // This is a powerful hint to the model to follow the JSON instruction.
+            responseMimeType: "application/json",
         },
     });
 
@@ -104,8 +144,9 @@ export async function generateGeminiChatResponse(
     console.log(`gemini.ts: Entered generateGeminiChatResponse() for sender [${senderId}].`);
     console.log(`gemini.ts: New message from user [${senderId}]: "${newUserMessage}"`);
 
-    const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
-    console.log(`gemini.ts: Current history for [${senderId}]:`, JSON.stringify(currentHistory, null, 2));
+    // The chat history is not passed to the model for this specific use case,
+    // as each message is evaluated independently for task creation intent.
+    const currentHistory: ChatHistoryItem[] = [];
 
     try {
         const userHistoryParts: ChatMessagePart[] = [{ text: newUserMessage }];
@@ -118,10 +159,11 @@ export async function generateGeminiChatResponse(
             userHistoryParts
         );
 
-        if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry, modelHistoryEntry);
-            chatHistories[senderId] = currentHistory;
-        }
+        // We don't save history for this model, as each turn is stateless.
+        // if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
+        //     currentHistory.push(userHistoryEntry, modelHistoryEntry);
+        //     chatHistories[senderId] = currentHistory;
+        // }
         return modelResponseText;
 
     } catch (error) {
@@ -177,18 +219,20 @@ async function _processMediaWithGemini(
             { text: textPrompt }
         ];
 
+        // The chat history is not passed to the model for this specific use case.
         const { modelResponseText, userHistoryEntry, modelHistoryEntry } = await _performGeminiChatInteraction(
             aiClient,
             senderId,
-            currentHistory,
+            [], // Sending empty history
             messageContentToSend,
             userHistoryPartsToLog
         );
 
-        if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
-            currentHistory.push(userHistoryEntry, modelHistoryEntry);
-            chatHistories[senderId] = currentHistory;
-        }
+        // We don't save history for this model.
+        // if (modelResponseText && userHistoryEntry && modelHistoryEntry) {
+        //     currentHistory.push(userHistoryEntry, modelHistoryEntry);
+        //     chatHistories[senderId] = currentHistory;
+        // }
         
         return modelResponseText;
 
