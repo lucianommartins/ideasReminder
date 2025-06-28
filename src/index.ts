@@ -529,9 +529,16 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
                                     } else {
                                         console.log(`index.ts: Calling createGoogleTask for [${senderId}] with details:`, JSON.stringify(taskDetails, null, 2));
                                         
+                                        // Combine all details into a single description string for the Google Task notes.
+                                        const combinedDescription = [
+                                            `Description: ${taskDetails.description}`,
+                                            `Final Result: ${taskDetails.final_result}`,
+                                            `User Experience: ${taskDetails.user_experience}`
+                                        ].join('\n\n');
+
                                         const result = await createGoogleTask(senderId, {
                                             title: taskDetails.objective,
-                                            description: taskDetails.description,
+                                            description: combinedDescription,
                                         });
 
                                         if (typeof result === 'string') {
@@ -541,6 +548,41 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
                                             const successMessage = TASK_MESSAGES.SUCCESS(taskTitle);
                                             twiml.message(successMessage);
                                             console.log(`index.ts: Successfully created task titled "${taskTitle}" for [${senderId}].`);
+                                        }
+                                    }
+                                }
+                                // --- Handle Task Listing Request ---
+                                else if (parsedJson.isTaskListRequest === true) {
+                                    actionWasHandled = true;
+                                    console.log(`index.ts: Gemini identified a task list request for [${senderId}].`);
+                                    if (!isUserAuthenticated(senderId)) {
+                                        twiml.message(AUTH_MESSAGES.TASK_LISTING_AUTH_REQUIRED);
+                                    } else {
+                                        const tasksString = await getFormattedTasksString(senderId);
+                                        twiml.message(tasksString);
+                                        console.log(`index.ts: Successfully sent task list to [${senderId}].`);
+                                    }
+                                }
+                                // --- Handle Task Deletion Request ---
+                                else if (parsedJson.isTaskDeletionRequest === true) {
+                                    actionWasHandled = true;
+                                    console.log(`index.ts: Gemini identified a task deletion request for [${senderId}].`);
+                                    if (!isUserAuthenticated(senderId)) {
+                                        twiml.message(AUTH_MESSAGES.TASK_DELETION_AUTH_REQUIRED);
+                                    } else {
+                                        // Fetch the user's current tasks to present them for deletion.
+                                        const taskTitles = await getTaskTitles(senderId);
+                                        if (taskTitles && taskTitles.length > 0) {
+                                            // Store the list of task titles in the pendingDeletion state.
+                                            pendingDeletion[senderId] = taskTitles;
+                                            // Format the message to list the tasks for the user.
+                                            const tasksListForDeletion = taskTitles.map((title, index) => `${index + 1}. ${title}`).join('\n');
+                                            const deletionPrompt = `${TASK_MESSAGES.DELETION_PROMPT}\n${tasksListForDeletion}`;
+                                            twiml.message(deletionPrompt);
+                                            console.log(`index.ts: Prompting user [${senderId}] to select a task for deletion.`);
+                                        } else {
+                                            twiml.message(TASK_MESSAGES.DELETION_NO_TASKS);
+                                            console.log(`index.ts: User [${senderId}] tried to delete a task, but they have none.`);
                                         }
                                     }
                                 }

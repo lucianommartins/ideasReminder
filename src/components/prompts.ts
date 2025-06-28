@@ -120,7 +120,9 @@ export const AUTH_MESSAGES = {
     DISCONNECT_SUCCESS: 'Your Google Tasks account has been disconnected. Your tokens have been cleared.',
     DISCONNECT_FAILURE: 'No active Google Tasks connection found to disconnect.',
     AUTH_SUCCESS_PROACTIVE_MESSAGE: '✅ Authentication with Google Tasks was successful! You can now use task-related commands.',
-    TASK_CREATION_AUTH_REQUIRED: "I've structured your task, but you need to connect your Google account first. Please use the command `/connect_google_tasks` and then send your task request again."
+    TASK_CREATION_AUTH_REQUIRED: "I've structured your task, but you need to connect your Google account first. Please use the command `/connect_google_tasks` and then send your task request again.",
+    TASK_LISTING_AUTH_REQUIRED: "To see your tasks, you need to connect your Google account first. Please use the command `/connect_google_tasks` and then try asking me to list your tasks again.",
+    TASK_DELETION_AUTH_REQUIRED: "To delete a task, you need to connect your Google account first. Please use the command `/connect_google_tasks` and then try asking me to delete a task again."
 };
 
 // --- Media Handling ---
@@ -143,5 +145,7 @@ export const GENERAL_MESSAGES = {
 
 // --- Task Creation ---
 export const TASK_MESSAGES = {
-    SUCCESS: (title: string) => `✅ Task created successfully!\n\n*${title}* has been added to your Google Tasks and is scheduled for tomorrow at 9 AM.`
+    SUCCESS: (title: string) => `✅ Task created successfully!\n\n*${title}* has been added to your Google Tasks and is scheduled for tomorrow at 9 AM.`,
+    DELETION_PROMPT: "Which task would you like to delete? Please reply with the number or the exact title from the list below:",
+    DELETION_NO_TASKS: "You don't have any tasks to delete."
 }; 
