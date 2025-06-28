@@ -1,4 +1,5 @@
 .env
 samplesjs.ts
 google_tokens.json
+returning_users.json
 node_modules/

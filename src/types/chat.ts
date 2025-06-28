@@ -64,6 +64,8 @@ export interface StoredToken {
      * The timestamp (in milliseconds since the epoch) when the access_token expires.
      */
     expiry_date: number;
+    locale?: string; // e.g., 'en-US', 'pt-BR'
+    country?: string; // e.g., 'BR', 'US'
 }
 
 /**
