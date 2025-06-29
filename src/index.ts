@@ -51,6 +51,17 @@ import {
 // --- INITIAL SETUP & ENVIRONMENT VALIDATION ---
 dotenv.config();
 
+// --- START: Troubleshooting Environment Variables ---
+console.log("--- Troubleshooting Environment Variables ---");
+console.log(`TWILIO_ACCOUNT_SID: ${process.env.TWILIO_ACCOUNT_SID}`);
+console.log(`TWILIO_AUTH_TOKEN: ${process.env.TWILIO_AUTH_TOKEN}`);
+console.log(`FROM_NUMBER: ${process.env.FROM_NUMBER}`);
+console.log(`GEMINI_API_KEY: ${process.env.GEMINI_API_KEY}`);
+console.log(`GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID}`);
+console.log(`GOOGLE_CLIENT_SECRET: ${process.env.GOOGLE_CLIENT_SECRET}`);
+console.log(`GOOGLE_REDIRECT_URI: ${process.env.GOOGLE_REDIRECT_URI}`);
+console.log("--- End Troubleshooting ---");
+
 const requiredEnvVars = [
     'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'FROM_NUMBER', 
     'GEMINI_API_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI'
