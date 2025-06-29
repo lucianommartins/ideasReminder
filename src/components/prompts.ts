@@ -145,7 +145,7 @@ export const GENERAL_MESSAGES = {
 
 // --- Task Creation ---
 export const TASK_MESSAGES = {
-    SUCCESS: (title: string) => `✅ Task created successfully!\n\n*${title}* has been added to your Google Tasks and is scheduled for tomorrow at 9 AM.`,
+    SUCCESS: (title: string) => `✅ Task created successfully!\n\n*${title}* has been added to your Google Tasks and is scheduled for the next business day.`,
     DELETION_PROMPT: "Which task would you like to delete? Please reply with the number or the exact title from the list below:",
     DELETION_NO_TASKS: "You don't have any tasks to delete."
 }; 

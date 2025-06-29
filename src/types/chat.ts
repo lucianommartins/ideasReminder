@@ -33,15 +33,33 @@ export type ChatHistories = Record<string, ChatHistoryItem[]>;
  * Represents the structured details of a task identified by the Gemini model.
  * This is the structure the model is prompted to return as JSON.
  */
-export interface IdentifiedTask {
-    isTask: true;
-    details: {
-        objective: string;      // The main, concise goal of the task.
-        description: string;    // A more detailed description.
-        final_result: string;   // The expected outcome or deliverable.
-        user_experience: string // How this task impacts the user experience.
+export type IdentifiedTask = 
+    | {
+        isTask: true;
+        isTaskListRequest?: never;
+        isTaskDeletionRequest?: never;
+        details: {
+            objective: string;
+            description: string;
+            final_result: string;
+            user_experience: string;
+        };
+        taskTitle?: never;
+    }
+    | {
+        isTask?: never;
+        isTaskListRequest: true;
+        isTaskDeletionRequest?: never;
+        details?: never;
+        taskTitle?: never;
+    }
+    | {
+        isTask?: never;
+        isTaskListRequest?: never;
+        isTaskDeletionRequest: true;
+        details?: never;
+        taskTitle: string | null;
     };
-}
 
 // --- Types for Google API Tokens ---
 
@@ -64,8 +82,6 @@ export interface StoredToken {
      * The timestamp (in milliseconds since the epoch) when the access_token expires.
      */
     expiry_date: number;
-    locale?: string; // e.g., 'en-US', 'pt-BR'
-    country?: string; // e.g., 'BR', 'US'
 }
 
 /**

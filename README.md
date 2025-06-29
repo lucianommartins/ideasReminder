@@ -1,146 +1,162 @@
 # 💡 VoiceTasks - Your WhatsApp Sidekick for Ideas and Tasks! 🧠
 
-Ever have a brilliant idea闪过 (shǎn guò - flash by) your mind, only to forget it moments later? VoiceTasks is here to help! This WhatsApp bot, powered by Node.js, Express, Twilio, and Google's Gemini AI, not only captures your thoughts but also integrates seamlessly with your **Google Tasks**, turning fleeting ideas into actionable items.
+VoiceTasks is a powerful WhatsApp bot designed to be your personal assistant. It leverages Google's Gemini AI to understand your text, voice notes, and images, and integrates seamlessly with **Google Tasks** to turn fleeting ideas into actionable items.
 
-Send text, voice notes, or even images, and let Gemini process them. Or, use simple commands to manage your Google Tasks directly from WhatsApp.
+Built to be scalable and robust, this application uses **Google Cloud Firestore** for persistent data storage, making it perfect for deployment on serverless platforms like **Google Cloud Run**.
 
 ## ✨ Features
 
 *   **Conversational AI:** Chat naturally with the Gemini Pro model. It maintains a separate conversation history for each user.
 *   **Multimedia Processing:** Send audio, images, videos, or documents (PDF, DOCX, etc.) for Gemini to analyze and discuss.
-*   **Google Tasks Integration:**
+*   **Deep Google Tasks Integration:**
     *   Securely connect your Google Account using an OAuth2 flow.
-    *   List all your Google Task lists.
-    *   View tasks within any specific list.
-    *   Add new tasks to your default list with a simple command.
-    *   Check the status of your connection.
-*   **Persistent Connections:** User authentication tokens for Google Tasks are securely stored, so you only need to connect your account once.
-*   **Command-Driven Interface:** A clear set of commands for interacting with Google Tasks, with a helpful guide for invalid commands.
+    *   Let Gemini intelligently create, list, and manage your tasks.
+    *   Use simple commands like `/status_google_tasks` to check your connection.
+*   **Persistent & Scalable:** All user data, including authentication tokens, is stored securely in Google Cloud Firestore, ensuring no data is lost between server instances or deploys.
+*   **Stateless Architecture:** Designed to run efficiently on serverless platforms like Google Cloud Run.
 
 ## 🛠️ Tech Stack
 
 *   **Backend:** Node.js, Express.js
 *   **Language:** TypeScript
+*   **Cloud Platform:** Google Cloud Run, Google Cloud Firestore
 *   **Messaging:** Twilio API (for WhatsApp)
 *   **AI & NLP:** Google Gemini API
-*   **Google Integration:** Google Tasks API, Google Auth Library
-*   **Environment Management:** `dotenv`
-*   **HTTP Requests:** `axios`
+*   **Google Integration:** Google Tasks API, Google People API, Google Auth Library
 
-## 🚀 Getting Started
+---
+
+## 🚀 Deployment Guide (Google Cloud Run)
+
+This guide covers deploying the application to Google Cloud Run.
 
 ### 1. Prerequisites
 
 *   Node.js (v18.x or later)
-*   npm (or Yarn)
-*   Git
-*   An [ngrok](https://ngrok.com/) account to expose your local server to the internet for Twilio webhooks.
+*   A Google Cloud Platform (GCP) project with billing enabled.
+*   [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (the `gcloud` command-line tool) installed and authenticated.
+*   A Twilio account with a configured WhatsApp number.
 
-### 2. Clone the Repository
-```bash
-git clone https://github.com/lucianommartins/VoiceTasks.git
-cd VoiceTasks
-```
+### 2. Initial Setup
 
-### 3. Install Dependencies
-```bash
-npm install
-```
+1.  **Clone the Repository**
+    ```bash
+    git clone https://github.com/your-username/VoiceTasks.git
+    cd VoiceTasks
+    ```
 
-### 4. Google Cloud Project Setup
+2.  **Install Dependencies**
+    ```bash
+    npm install
+    ```
 
-To use the Google Tasks integration, you need to set up a project in the Google Cloud Console.
+### 3. Google Cloud Configuration
 
-1.  **Create a Project:** Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a new project.
-2.  **Enable APIs:** In your new project, go to the "APIs & Services" dashboard and click "+ ENABLE APIS AND SERVICES". Search for and enable the **Google Tasks API**.
-3.  **Configure OAuth Consent Screen:**
-    *   Go to "APIs & Services" > "OAuth consent screen".
-    *   Choose **External** and create a new consent screen.
-    *   Fill in the required app information (app name, user support email, developer contact).
-    *   On the "Scopes" page, click "Add or Remove Scopes" and add the scope for the Google Tasks API: `../auth/tasks`.
-    *   On the "Test users" page, add the Google account(s) you will be testing with.
-    *   **Crucially**, once you are ready, go back to the "OAuth consent screen" and click **"PUBLISH APP"** to move it from "Testing" to "In production". This ensures your refresh tokens do not expire every 7 days.
+1.  **Set Your Project ID**
+    Make sure `gcloud` is configured to use your target project.
+    ```bash
+    gcloud config set project YOUR_PROJECT_ID
+    ```
 
-4.  **Create Credentials:**
-    *   Go to "APIs & Services" > "Credentials".
-    *   Click "+ CREATE CREDENTIALS" and choose "OAuth client ID".
+2.  **Enable Required APIs**
+    The project requires several Google Cloud APIs. Run the provided script to enable them automatically.
+    ```bash
+    chmod +x setup/enable_gcp_apis.sh
+    ./setup/enable_gcp_apis.sh
+    ```
+    This will enable Cloud Run, Firestore, Cloud Build, and other necessary services.
+
+3.  **Create the Firestore Database**
+    Next, run the script to create the Firestore database instance for the project.
+    ```bash
+    chmod +x setup/setup_firestore.sh
+    ./setup/setup_firestore.sh
+    ```
+    This creates a database with the ID `voicetasks-db`.
+
+4.  **Create OAuth 2.0 Credentials**
+    *   Go to the [Google Cloud Console](https://console.cloud.google.com/) -> **APIs & Services** -> **Credentials**.
+    *   Click **+ CREATE CREDENTIALS** -> **OAuth client ID**.
     *   Select **Web application** as the application type.
-    *   Under "Authorized redirect URIs", click "+ ADD URI" and add the URL that ngrok will provide. For now, you can use a placeholder like `http://localhost:3000/auth/google/callback`, but you will need to update this later.
-    *   Click "Create". You will be shown your **Client ID** and **Client Secret**. Copy these securely.
+    *   Give it a name (e.g., "VoiceTasks-WebApp").
+    *   You will need a **Redirect URI** later. For now, you can leave it blank or add a placeholder like `http://localhost`. We will update this after the first deploy.
+    *   Click **Create**. Copy the **Client ID** and **Client Secret**. You will need these for your `.env` file.
 
-### 5. Set Up Environment Variables
+5.  **Configure OAuth Consent Screen**
+    *   In the **OAuth consent screen** tab, choose **External** and create a new consent screen.
+    *   Fill in the required app information (app name, user support email, developer contact).
+    *   On the "Scopes" page, add the following scopes:
+        *   `openid`
+        *   `https://www.googleapis.com/auth/userinfo.profile`
+        *   `https://www.googleapis.com/auth/user.addresses.read`
+        *   `https://www.googleapis.com/auth/tasks`
+    *   On the "Test users" page, add the Google account(s) you will be testing with.
+    *   **Crucially**, once you are ready, go back and click **"PUBLISH APP"** to move it to "Production" mode. This prevents refresh tokens from expiring every 7 days.
 
-Create a `.env` file in the root of the project:
-```bash
-touch .env
-```
+### 4. Environment Variables & Deployment
 
-Open the file and add the following variables, replacing the placeholders with your actual credentials:
+1.  **Create the `.env` file**
+    Create a file named `.env` in the root of the project and add the following, filling in your credentials. **Leave `GOOGLE_REDIRECT_URI` blank for now.**
 
-```env
-# Twilio Credentials
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_twilio_auth_token
+    ```env
+    # Twilio Credentials
+    TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    TWILIO_AUTH_TOKEN=your_twilio_auth_token
 
-# Your Twilio number (the one sending messages)
-FROM_NUMBER=whatsapp:+14155238886
+    # Your Twilio WhatsApp number
+    FROM_NUMBER=whatsapp:+14155238886
 
-# Google Gemini API Key
-GEMINI_API_KEY=your_gemini_api_key
+    # Google Gemini API Key
+    GEMINI_API_KEY=your_gemini_api_key
 
-# Google OAuth2 Credentials
-GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-# This MUST match the redirect URI you configured in your Google Cloud credentials
-# and it MUST use the HTTPS ngrok URL for the live application.
-GOOGLE_REDIRECT_URI=https://YOUR_NGROK_HTTPS_URL.ngrok.io/auth/google/callback
+    # Google OAuth2 Credentials (from Step 3.4)
+    GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
+    GOOGLE_CLIENT_SECRET=your_google_client_secret
 
-# Server Port
-PORT=3000
-```
+    # The URI for the Google Auth callback. We will get this URL after deploying.
+    # Example: https://voicetasks-service-xyz-uc.a.run.app/auth/google/callback
+    GOOGLE_REDIRECT_URI=
 
-### 6. Run the Application and Configure Webhooks
-
-1.  **Start the local server:**
-    ```bash
-    npm start
+    # Server Port (Cloud Run provides this automatically, but it's good for local testing)
+    PORT=8080
     ```
 
-2.  **Expose your server with ngrok:**
-    In a new terminal, run:
+2.  **First Deployment to Cloud Run**
+    Run the deployment script. You can specify your GCP region.
     ```bash
-    ngrok http 3000
+    ./deploy/deploy.sh us-central1
     ```
-    Ngrok will give you a public HTTPS URL (e.g., `https://xxxx-xxxx-xxxx.ngrok.io`). **Copy this URL.**
+    The first deployment will likely fail to start correctly because `GOOGLE_REDIRECT_URI` is missing, but it will create the service and give you a **Service URL** (e.g., `https://voicetasks-service-xyz-uc.a.run.app`). **Copy this URL.**
 
-3.  **Update Google Redirect URI:**
-    *   Go back to your [Google Cloud Console Credentials](https://console.cloud.google.com/apis/credentials).
-    *   Edit your OAuth 2.0 Client ID.
-    *   Update the "Authorized redirect URI" to be your ngrok HTTPS URL followed by `/auth/google/callback`.
-    *   **Example:** `https://xxxx-xxxx-xxxx.ngrok.io/auth/google/callback`
-    *   Update the `GOOGLE_REDIRECT_URI` in your `.env` file to match this exactly.
+3.  **Update Credentials and `.env` file**
+    *   **Google Cloud Console:** Go back to your OAuth Client ID credentials. Under "Authorized redirect URIs", add the following:
+        `YOUR_SERVICE_URL/auth/google/callback`
+        (e.g., `https://voicetasks-service-xyz-uc.a.run.app/auth/google/callback`)
+    *   **.env file:** Now, update the `GOOGLE_REDIRECT_URI` in your `.env` file with this same URL.
 
-4.  **Configure Twilio Webhook:**
-    *   Go to your Twilio number settings in the Twilio Console.
-    *   Under the "Messaging" section, in the "A MESSAGE COMES IN" field, set the webhook to your ngrok HTTPS URL followed by `/webhook/twilio`.
-    *   **Example:** `https://xxxx-xxxx-xxxx.ngrok.io/webhook/twilio`
-    *   Ensure the HTTP method is set to `POST`.
-    *   Save your changes.
+4.  **Final Deployment**
+    Run the deploy script again. This time, it will inject the correct environment variables, and the service will start successfully.
+    ```bash
+    ./deploy/deploy.sh us-central1
+    ```
 
-5.  **Restart the Node.js server** to apply the changes from your `.env` file.
+### 5. Configure Twilio Webhook
+
+*   Go to your Twilio number settings in the Twilio Console.
+*   Under the "Messaging" section, in the "A MESSAGE COMES IN" field, set the webhook to your Cloud Run Service URL followed by `/webhook/twilio`.
+*   **Example:** `https://voicetasks-service-xyz-uc.a.run.app/webhook/twilio`
+*   Ensure the HTTP method is set to `HTTP POST`.
+*   Save your changes. Your bot is now live!
 
 ## 🤖 Bot Commands
 
 Interact with the bot using the following commands in WhatsApp:
 
-*   **Any message not starting with `/`**: Starts or continues a conversation with the Gemini AI.
-
-*   `/connect_google_tasks`: Initiates the process to connect your Google Tasks account. The bot will send you a unique link to authorize the application.
-*   `/disconnect_google_tasks`: Disconnects your Google Tasks account and deletes your stored authentication tokens.
-*   `/status_google_tasks`: Checks if you are connected and shows when your current access token expires.
-*   `/list_task_lists`: Displays all of your Google Task lists.
-*   `/show_tasks <list_name>`: Shows all active tasks from a specific list. Use `@default` for your default task list.
-*   `/add_task <task_description>`: Adds a new task with the given description to your default task list.
+*   **Any message not starting with `/`**: Starts or continues a conversation with the Gemini AI. The AI can now identify and act on requests to create, list, or delete tasks.
+*   `/connect_google_tasks`: Initiates the process to connect your Google Tasks account.
+*   `/disconnect_google_tasks`: Disconnects your Google Tasks account and deletes your token from Firestore.
+*   `/status_google_tasks`: Checks if you are connected to Google.
+*   `/help` or `/start`: Shows the initial welcome message.
 
 ---
 

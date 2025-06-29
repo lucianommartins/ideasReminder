@@ -47,20 +47,10 @@ import {
     deleteGoogleTask,
     getTaskTitles
 } from './components/gtasks';
+import { isReturningUser, addNewUser } from './components/firestore';
 
 // --- INITIAL SETUP & ENVIRONMENT VALIDATION ---
 dotenv.config();
-
-// --- START: Troubleshooting Environment Variables ---
-console.log("--- Troubleshooting Environment Variables ---");
-console.log(`TWILIO_ACCOUNT_SID: ${process.env.TWILIO_ACCOUNT_SID}`);
-console.log(`TWILIO_AUTH_TOKEN: ${process.env.TWILIO_AUTH_TOKEN}`);
-console.log(`FROM_NUMBER: ${process.env.FROM_NUMBER}`);
-console.log(`GEMINI_API_KEY: ${process.env.GEMINI_API_KEY}`);
-console.log(`GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID}`);
-console.log(`GOOGLE_CLIENT_SECRET: ${process.env.GOOGLE_CLIENT_SECRET}`);
-console.log(`GOOGLE_REDIRECT_URI: ${process.env.GOOGLE_REDIRECT_URI}`);
-console.log("--- End Troubleshooting ---");
 
 const requiredEnvVars = [
     'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'FROM_NUMBER', 
@@ -100,57 +90,10 @@ const chatHistories: ChatHistories = {};
 const mediaDir = path.join('/tmp', 'media');
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 
-// State object to hold media files awaiting a text prompt.
+// --- STATE MANAGEMENT ---
+// These objects hold temporary, in-memory state for the application.
 const pendingMedia: { [senderId: string]: { filePath: string; mimeType: string } } = {};
-// State object to track users who need to confirm a task deletion.
 const pendingDeletion: { [senderId: string]: string[] } = {};
-
-// --- PERSISTENCE FOR RETURNING USERS ---
-const DATA_DIR = path.join(__dirname, 'data');
-const RETURNING_USERS_FILE_PATH = path.join(DATA_DIR, 'returning_users.json');
-let returningUsers: Set<string> = new Set();
-
-/**
- * Loads the set of returning user IDs from a JSON file into memory.
- * This is called once on server startup.
- * @returns A Set containing all unique user IDs from previous sessions.
- */
-function loadReturningUsers(): Set<string> {
-    if (!fs.existsSync(DATA_DIR)) {
-        console.log(`index.ts: Data directory does not exist. Creating: ${DATA_DIR}`);
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (fs.existsSync(RETURNING_USERS_FILE_PATH)) {
-        try {
-            const data = fs.readFileSync(RETURNING_USERS_FILE_PATH, 'utf8');
-            const usersArray = JSON.parse(data) as string[];
-            console.log(`index.ts: Loaded ${usersArray.length} returning users from file.`);
-            return new Set(usersArray);
-        } catch (error) {
-            console.error('index.ts: Error reading or parsing returning_users.json. Starting fresh.', error);
-        }
-    }
-    return new Set();
-}
-
-/**
- * Adds a new user's ID to the in-memory Set and persists the updated Set to the JSON file.
- * @param {string} senderId The unique ID of the new user.
- */
-async function saveNewUser(senderId: string): Promise<void> {
-    if (returningUsers.has(senderId)) return; // Should not happen with current logic, but a good safeguard.
-    
-    returningUsers.add(senderId);
-    console.log(`index.ts: Adding new user [${senderId}] to returning users list.`);
-    
-    try {
-        const usersArray = Array.from(returningUsers);
-        await fsPromises.writeFile(RETURNING_USERS_FILE_PATH, JSON.stringify(usersArray, null, 2));
-        console.log(`index.ts: Successfully saved returning users file. Total users: ${usersArray.length}`);
-    } catch (error) {
-        console.error(`index.ts: Failed to save returning_users.json.`, error);
-    }
-}
 
 /**
  * Formats a response from the Gemini model before sending it to the user.
@@ -218,6 +161,99 @@ function findTaskFromReply(reply: string, taskTitles: string[]): string | null {
     return null;
 }
 
+/**
+ * A centralized function to process Gemini's response. It checks for actionable JSON
+ * (for creating, listing, or deleting tasks) and handles it. Otherwise, it formats
+ * the response as a standard chat message.
+ * @param responseText The raw text response from the Gemini API.
+ * @param googleSearchUsed A boolean indicating if Google Search was used.
+ * @param senderId The user's unique identifier.
+ * @param twiml The Twilio TwiML response object.
+ */
+async function handleGeminiResponse(responseText: string, googleSearchUsed: boolean, senderId: string, twiml: twilio.twiml.MessagingResponse) {
+    if (!responseText) {
+        twiml.message(GENERAL_MESSAGES.GEMINI_EMPTY_RESPONSE);
+        return;
+    }
+
+    try {
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            throw new Error("Response from Gemini was not valid JSON.");
+        }
+
+        const jsonString = jsonMatch[0];
+        const parsedJson: IdentifiedTask = JSON.parse(jsonString);
+
+        const isAuthenticated = await isUserAuthenticated(senderId);
+
+        if (parsedJson.isTask) {
+            console.log(`index.ts: Gemini identified a task for creation from [${senderId}].`);
+            if (!isAuthenticated) {
+                twiml.message(AUTH_MESSAGES.TASK_CREATION_AUTH_REQUIRED);
+            } else {
+                // Calculate due date for the next business day.
+                const tomorrow = new Date();
+                tomorrow.setHours(0, 0, 0, 0); // Start with a clean slate at midnight.
+
+                const dayOfWeek = tomorrow.getDay(); // Sunday = 0, Monday = 1, ..., Saturday = 6
+
+                if (dayOfWeek >= 1 && dayOfWeek <= 4) { // Monday to Thursday
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                } else if (dayOfWeek === 5) { // Friday
+                    tomorrow.setDate(tomorrow.getDate() + 3); // Skip Saturday and Sunday
+                } else if (dayOfWeek === 6) { // Saturday
+                    tomorrow.setDate(tomorrow.getDate() + 2); // Skip Sunday
+                } else { // Sunday (dayOfWeek === 0)
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                }
+
+                const taskResult = await createGoogleTask(senderId, {
+                    title: parsedJson.details.objective,
+                    description: `Description: ${parsedJson.details.description}\nFinal Result: ${parsedJson.details.final_result}\nUser Experience: ${parsedJson.details.user_experience}`,
+                    dueDate: tomorrow.toISOString(),
+                });
+                if (typeof taskResult === 'string') {
+                    twiml.message(taskResult);
+                } else {
+                    twiml.message(TASK_MESSAGES.SUCCESS(taskResult.title || 'Untitled Task'));
+                }
+            }
+        } else if (parsedJson.isTaskListRequest) {
+            console.log(`index.ts: Gemini identified a task listing request from [${senderId}].`);
+            if (!isAuthenticated) {
+                twiml.message(AUTH_MESSAGES.TASK_LISTING_AUTH_REQUIRED);
+            } else {
+                const tasksString = await getFormattedTasksString(senderId);
+                twiml.message(tasksString);
+            }
+        } else if (parsedJson.isTaskDeletionRequest) {
+            console.log(`index.ts: Gemini identified a task deletion request from [${senderId}].`);
+            if (!isAuthenticated) {
+                twiml.message(AUTH_MESSAGES.TASK_DELETION_AUTH_REQUIRED);
+            } else if (parsedJson.taskTitle) {
+                const deletionResult = await deleteGoogleTask(senderId, parsedJson.taskTitle);
+                twiml.message(deletionResult);
+            } else {
+                const taskTitles = await getTaskTitles(senderId);
+                if (taskTitles && taskTitles.length > 0) {
+                    pendingDeletion[senderId] = taskTitles;
+                    const numberedTasks = taskTitles.map((title, i) => `${i + 1}. ${title}`).join('\n');
+                    twiml.message(`${TASK_MESSAGES.DELETION_PROMPT}\n\n${numberedTasks}`);
+                } else {
+                    twiml.message(TASK_MESSAGES.DELETION_NO_TASKS);
+                }
+            }
+        } else {
+            console.warn(`index.ts: Received unexpected but valid JSON from Gemini for [${senderId}]. Treating as normal chat.`);
+            twiml.message(formatGeminiResponse(responseText, googleSearchUsed));
+        }
+    } catch (e) {
+        // Not JSON, so it's a normal chat response
+        twiml.message(formatGeminiResponse(responseText, googleSearchUsed));
+    }
+}
+
 // --- WELCOME MESSAGE FUNCTION ---
 /**
  * Sends a rich, formatted welcome message to the user.
@@ -246,7 +282,70 @@ app.get('/auth/google/callback', async (req: Request, res: Response, next: NextF
     try {
         const { code, state: senderId, error: errorQueryParam } = req.query;
         if (errorQueryParam) {
-            return res.status(400).send(`<html><body><h1>Authentication Failed</h1><p>Google authentication failed: ${errorQueryParam}. You can close this page.</p></body></html>`);
+            return res.status(400).send(`
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Authentication Failed</title>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                            background-color: #f0f2f5;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            height: 100vh;
+                            margin: 0;
+                            color: #333;
+                        }
+                        .container {
+                            text-align: center;
+                            background-color: #ffffff;
+                            padding: 40px;
+                            border-radius: 12px;
+                            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                            max-width: 500px;
+                            width: 90%;
+                        }
+                        .logo {
+                            width: 200px;
+                            margin-bottom: 24px;
+                        }
+                        h1 {
+                            font-size: 24px;
+                            color: #EA4335; /* Google Red */
+                            margin-bottom: 16px;
+                        }
+                        p {
+                            font-size: 16px;
+                            line-height: 1.6;
+                            margin-bottom: 8px;
+                        }
+                        .error-message {
+                            font-weight: 500;
+                            color: #555;
+                            word-break: break-all;
+                        }
+                        .footer {
+                            margin-top: 24px;
+                            font-size: 14px;
+                            color: #888;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/5/56/Google_DeepMind_logo.png" alt="Google DeepMind Logo" class="logo">
+                        <h1>Authentication Failed</h1>
+                        <p>An error occurred during the authentication process:</p>
+                        <p><span class="error-message">${errorQueryParam}</span></p>
+                        <p class="footer">You can close this page and try again from WhatsApp.</p>
+                    </div>
+                </body>
+                </html>
+            `);
         }
         if (!code || typeof code !== 'string' || !senderId || typeof senderId !== 'string') {
             return res.status(400).send('Authentication failed: Missing authorization code or user identifier.');
@@ -262,13 +361,66 @@ app.get('/auth/google/callback', async (req: Request, res: Response, next: NextF
             console.error(`index.ts: FAILED to send proactive success message to [${senderId}].`, twilioError);
         }
         return res.send(`
-            <html>
-                <head><title>Authentication Successful</title></head>
-                <body>
-                    <h1>Google Tasks Authentication Successful!</h1>
-                    <p>Your account for WhatsApp user ${senderId} has been successfully linked with Google Tasks.</p>
-                    <p>You can now close this page and return to WhatsApp.</p>
-                </body>
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Authentication Successful</title>
+                <style>
+                    body {
+                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                        background-color: #f0f2f5;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        margin: 0;
+                        color: #333;
+                    }
+                    .container {
+                        text-align: center;
+                        background-color: #ffffff;
+                        padding: 40px;
+                        border-radius: 12px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                        max-width: 500px;
+                        width: 90%;
+                    }
+                    .logo {
+                        width: 200px;
+                        margin-bottom: 24px;
+                    }
+                    h1 {
+                        font-size: 24px;
+                        color: #4285F4; /* Google Blue */
+                        margin-bottom: 16px;
+                    }
+                    p {
+                        font-size: 16px;
+                        line-height: 1.6;
+                        margin-bottom: 8px;
+                    }
+                    .user-id {
+                        font-weight: 500;
+                        color: #555;
+                        word-break: break-all;
+                    }
+                    .footer {
+                        margin-top: 24px;
+                        font-size: 14px;
+                        color: #888;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/5/56/Google_DeepMind_logo.png" alt="Google DeepMind Logo" class="logo">
+                    <h1>Authentication Successful!</h1>
+                    <p>Your account for WhatsApp user <span class="user-id">${senderId}</span> has been successfully linked with Google Tasks.</p>
+                    <p class="footer">You can now close this page and return to WhatsApp.</p>
+                </div>
+            </body>
             </html>
         `);
     } catch (error) {
@@ -285,6 +437,7 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
     const senderId = req.body.From as string | undefined;
     const numMedia = parseInt(req.body.NumMedia || '0', 10);
 
+    // 1. Basic Validation: Ensure a sender ID is present.
     if (!senderId) {
         console.error('index.ts: Critical - Missing senderId (From) in webhook request. Cannot process.');
         res.status(400).send('Sender ID missing.');
@@ -292,6 +445,7 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
     }
     console.log(`index.ts: Processing request for sender [${senderId}], Number of media items: ${numMedia}`);
 
+    // 2. Media Message Handling
     if (numMedia > 0) {
         console.log(`index.ts: Detected [${numMedia}] media item(s) from sender [${senderId}].`);
         if (numMedia > 1) {
@@ -300,336 +454,231 @@ app.post('/webhook/twilio', async (req: Request, res: Response) => {
             res.type('text/xml').send(twiml.toString());
             return;
         } else {
+            // Handle single media file
             const mediaUrl = req.body.MediaUrl0 as string | undefined;
             const mediaContentType = req.body.MediaContentType0 as string | undefined;
             let localMediaFilePath: string | undefined; // To be accessible in the finally block for cleanup
-            let geminiMediaResponse: string | undefined;
-            const userMessage = req.body.Body as string | undefined; // Corrected variable name
+            const userMessage = req.body.Body as string | undefined;
 
-            if (!mediaUrl || !mediaContentType) {
-                console.error(`index.ts: Missing MediaUrl0 or MediaContentType0 for media message from [${senderId}].`);
+            try {
+                if (!mediaUrl || !mediaContentType) {
+                    throw new Error("Missing MediaUrl0 or MediaContentType0 in webhook payload.");
+                }
+
+                localMediaFilePath = await downloadAndSaveMediaFile(mediaUrl, mediaContentType, senderId);
+                const userTextPrompt = userMessage?.trim() || ""; // Default to empty string if no text
+
+                if (!userTextPrompt) {
+                    // If the user sent media without text, store it and ask for a prompt.
+                    pendingMedia[senderId] = { filePath: localMediaFilePath, mimeType: mediaContentType };
+                    twiml.message(MEDIA_MESSAGES.PROMPT_FOR_MEDIA);
+                } else {
+                    // If text is present, process media and handle the response immediately.
+                    const { responseText, googleSearchUsed } = await processMedia(localMediaFilePath, mediaContentType, senderId, userTextPrompt);
+                    await handleGeminiResponse(responseText, googleSearchUsed, senderId, twiml);
+                    // Since it's processed, ensure the file is cleaned up.
+                    await fsPromises.unlink(localMediaFilePath).catch(err => console.error(`Failed to delete media file: ${err}`));
+                    localMediaFilePath = undefined; // Prevent double deletion in finally
+                }
+            } catch (error: any) {
+                console.error(`index.ts: Error processing media for [${senderId}]:`, error);
                 twiml.message(MEDIA_MESSAGES.ERROR_RECEIVING_MEDIA);
-            } else {
-                try {
-                    console.log(`index.ts: Downloading media for [${senderId}]: URL [${mediaUrl}], Type [${mediaContentType}]`);
-                    localMediaFilePath = await downloadAndSaveMediaFile(mediaUrl, mediaContentType, senderId);
-                    
-                    console.log(`index.ts: Download complete. Path: [${localMediaFilePath}]. Determining media type for Gemini processing for [${senderId}].`);
-
-                    // Supported MIME types based on user's provided list
-                    const supportedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
-                    const supportedAudioTypes = ['audio/ogg', 'audio/amr', 'audio/3gpp', 'audio/aac', 'audio/mpeg'];
-                    const supportedDocumentTypes = [
-                        'application/pdf', 
-                        'application/msword', // DOC
-                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // DOCX
-                        'application/vnd.openxmlformats-officedocument.presentationml.presentation', // PPTX
-                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' // XLSX
-                    ];
-                    const supportedVideoTypes = ['video/mp4'];
-
-                    // Determine the prompt: use user's message if available, otherwise use fixed prompt
-                    let effectivePrompt: string;
-                    const useSystemInstructionForTask = userMessage ? isTaskManagementRequest(userMessage) : false;
-
-                    if (supportedAudioTypes.includes(mediaContentType)) {
-                        effectivePrompt = (userMessage && userMessage.trim() !== "") ? userMessage : FIXED_TEXT_PROMPT_FOR_AUDIO;
-                        console.log(`index.ts: Processing downloaded audio for [${senderId}]. Prompt: "${effectivePrompt}"`);
-                        geminiMediaResponse = await processAudioWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories, useSystemInstructionForTask);
-                    } else if (supportedImageTypes.includes(mediaContentType) || supportedVideoTypes.includes(mediaContentType) || supportedDocumentTypes.includes(mediaContentType)) {
-                        if (userMessage && userMessage.trim() !== "") {
-                            // If there is a text message along with the media, process it directly
-                            effectivePrompt = userMessage;
-                            console.log(`index.ts: Processing media with user-provided text for [${senderId}]. Prompt: "${effectivePrompt}"`);
-                            if (supportedImageTypes.includes(mediaContentType)) {
-                                geminiMediaResponse = await processImageWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories, useSystemInstructionForTask);
-                            } else if (supportedVideoTypes.includes(mediaContentType)) {
-                                geminiMediaResponse = await processVideoWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories, useSystemInstructionForTask);
-                            } else { // Document
-                                geminiMediaResponse = await processDocumentWithGemini(ai, senderId, localMediaFilePath, mediaContentType, effectivePrompt, chatHistories, useSystemInstructionForTask);
-                            }
-                        } else {
-                            // If there is no text, store the media and ask the user what to do with it
-                            console.log(`index.ts: Media received without prompt from [${senderId}]. Storing and asking for instructions.`);
-                            pendingMedia[senderId] = { filePath: localMediaFilePath, mimeType: mediaContentType };
-                            twiml.message(MEDIA_MESSAGES.PROMPT_FOR_MEDIA);
-                            // We set localMediaFilePath to undefined to prevent it from being deleted in the finally block
-                            localMediaFilePath = undefined; 
-                        }
-                    } else {
-                        console.warn(`index.ts: User [${senderId}] sent an unsupported media file type: ${mediaContentType}.`);
-                        twiml.message(MEDIA_MESSAGES.UNSUPPORTED_MEDIA_TYPE);
-                    }
-
-                    if (geminiMediaResponse === undefined && !twiml.response.children.length) {
-                        geminiMediaResponse = MEDIA_MESSAGES.RESPONSE_MEDIA_NO_TEXT;
-                        console.warn(`index.ts: Gemini media processing for a supported type returned an empty/undefined response for [${senderId}]. Using fallback message.`);
-                    }
-                    
-                    if (geminiMediaResponse && !twiml.response.children.length) { // Only add message if not already set (e.g., by unsupported type)
-                        // For media responses, we don't currently detect search usage, so we pass false.
-                        twiml.message(formatGeminiResponse(geminiMediaResponse, false));
-                    }
-                    
-                    if (geminiMediaResponse) {
-                         console.log(`index.ts: Media processing by Gemini complete for [${senderId}]. Response prepared: "${geminiMediaResponse}"`);
-                    }
-
-                } catch (error) {
-                    console.error(`index.ts: Error processing media message for [${senderId}]:`, error);
-                    twiml.message(MEDIA_MESSAGES.ERROR_PROCESSING_MEDIA);
-                } finally {
-                    if (localMediaFilePath) {
-                        console.log(`index.ts: Attempting to delete local media file: ${localMediaFilePath} for [${senderId}] in finally block.`);
-                        try {
-                            await fsPromises.unlink(localMediaFilePath);
-                            console.log(`index.ts: Successfully deleted local media file: ${localMediaFilePath}`);
-                        } catch (unlinkError) {
-                            console.error(`index.ts: Failed to delete local media file ${localMediaFilePath}:`, unlinkError);
-                        }
+            } finally {
+                // The finally block now only handles the cleanup of files that were not
+                // processed immediately (i.e., those pending a prompt).
+                if (localMediaFilePath) {
+                    try {
+                        await fsPromises.unlink(localMediaFilePath);
+                        console.log(`index.ts: Cleaned up media file [${localMediaFilePath}] that was pending a prompt.`);
+                    } catch (cleanupError) {
+                        console.error(`index.ts: Failed to clean up pending media file [${localMediaFilePath}].`, cleanupError);
                     }
                 }
+                res.type('text/xml').send(twiml.toString());
             }
-        }
-    } else {
-        // --- TEXT MESSAGE HANDLING ---
-        const incomingMsg = req.body.Body as string | undefined;
-        console.log(`index.ts: No media detected. Processing as text message from [${senderId}]: "${incomingMsg || '[empty message]'}"`);
-
-        if (!incomingMsg) {
-            console.warn(`index.ts: Missing Body (text content) for message from [${senderId}]. Sending generic reply.`);
-            twiml.message(GENERAL_MESSAGES.EMPTY_MESSAGE_BODY);
-        } else {
-            // Check if the user has interacted before by checking our persistent store.
-            const isNewUser = !returningUsers.has(senderId);
-
-            if (isNewUser) {
-                console.log(`index.ts: New user detected [${senderId}]. Sending welcome message and saving user.`);
-                sendWelcomeMessage(twiml);
-                await saveNewUser(senderId);
-                
-                // End the interaction here to prevent Gemini from also responding to the "hello" message.
-                res.writeHead(200, { 'Content-Type': 'text/xml' });
-                res.end(twiml.toString());
-                return;
-            }
-            
-            // Normalize message for easier command parsing
-            const lowerCaseMsg = incomingMsg.toLowerCase().trim();
-
-            if (lowerCaseMsg === '/connect_google_tasks') {
-                console.log(`index.ts: Received /connect_google_tasks command from [${senderId}].`);
-                
-                if (isUserAuthenticated(senderId)) {
-                    console.log(`index.ts: User [${senderId}] is already authenticated. Informing the user.`);
-                    twiml.message(AUTH_MESSAGES.ALREADY_AUTHENTICATED);
-                } else {
-                    console.log(`index.ts: User [${senderId}] is not authenticated. Generating auth URL.`);
-                    const initiationUrl = `${SERVER_BASE_URL}/auth/google/initiate?senderId=${encodeURIComponent(senderId)}`;
-                    
-                    console.log(`index.ts: Sending rich auth initiation message to [${senderId}].`);
-                    twiml.message(AUTH_MESSAGES.INITIATE_AUTH_INSTRUCTIONS.replace('{authUrl}', initiationUrl));
-                }
-            
-            } else if (lowerCaseMsg === '/disconnect_google_tasks') {
-                console.log(`index.ts: Received /disconnect_google_tasks command from [${senderId}].`);
-                const cleared = clearUserTokens(senderId);
-                if (cleared) {
-                    twiml.message(AUTH_MESSAGES.DISCONNECT_SUCCESS);
-                } else {
-                    twiml.message(AUTH_MESSAGES.DISCONNECT_FAILURE);
-                }
-            
-            } else if (lowerCaseMsg === '/status_google_tasks') {
-                console.log(`index.ts: Received /status_google_tasks command from [${senderId}].`);
-                const statusMessage = await getAuthStatus(senderId);
-                twiml.message(statusMessage);
-
-            } else if (lowerCaseMsg === '/help' || lowerCaseMsg === '/start') {
-                console.log(`index.ts: Received /help or /start command from [${senderId}]. Resending welcome message.`);
-                sendWelcomeMessage(twiml);
-            } else {
-                // If the message starts with '/' it's an attempt at a command that we don't recognize.
-                if (incomingMsg.trim().startsWith('/')) {
-                    twiml.message(INVALID_COMMAND_MESSAGE);
-                } else {
-                    // --- State-Based Action Handling (Deletion Confirmation) ---
-                    if (pendingDeletion[senderId]) {
-                        console.log(`User [${senderId}] is in a pending deletion state. Trying to match reply: "${incomingMsg}"`);
-                        const taskTitles = pendingDeletion[senderId];
-                        const taskTitleToConfirm = findTaskFromReply(incomingMsg, taskTitles);
-
-                        if (taskTitleToConfirm) {
-                            console.log(`Match found. Deleting task "${taskTitleToConfirm}" for [${senderId}].`);
-                            const deletionMessage = await deleteGoogleTask(senderId, taskTitleToConfirm);
-                            twiml.message(deletionMessage);
-                            delete pendingDeletion[senderId]; // Clear the state on success
-                        } else {
-                            console.log(`No match found for deletion reply from [${senderId}].`);
-                            twiml.message(`I didn't understand. Please reply with the exact task title or its number in the list.`);
-                             // Do not clear state, allowing the user to try again.
-                        }
-                        
-                        res.writeHead(200, { 'Content-Type': 'text/xml' });
-                        res.end(twiml.toString());
-                        return;
-                    }
-
-                    // This block is now only reached for returning users.
-                    const pendingUserMedia = pendingMedia[senderId];
-
-                    if (pendingUserMedia) {
-                        // A media file is awaiting a prompt for this user.
-                        console.log(`index.ts: Found pending media for [${senderId}]. Processing with new prompt: "${incomingMsg}"`);
-                        let geminiMediaResponse: string | undefined;
-                        const { filePath, mimeType } = pendingUserMedia;
-                        const useSystemInstructionForTask = isTaskManagementRequest(incomingMsg);
-
-                        try {
-                            // Use the stored media with the new text prompt
-                            if (mimeType.startsWith('image/')) {
-                                geminiMediaResponse = await processImageWithGemini(ai, senderId, filePath, mimeType, incomingMsg, chatHistories, useSystemInstructionForTask);
-                            } else if (mimeType.startsWith('video/')) {
-                                geminiMediaResponse = await processVideoWithGemini(ai, senderId, filePath, mimeType, incomingMsg, chatHistories, useSystemInstructionForTask);
-                            } else { // Document
-                                geminiMediaResponse = await processDocumentWithGemini(ai, senderId, filePath, mimeType, incomingMsg, chatHistories, useSystemInstructionForTask);
-                            }
-
-                            if (geminiMediaResponse) {
-                                twiml.message(formatGeminiResponse(geminiMediaResponse, false));
-                            } else {
-                                twiml.message(MEDIA_MESSAGES.RESPONSE_PENDING_MEDIA_NO_TEXT);
-                            }
-
-                        } catch (error) {
-                            console.error(`index.ts: Error processing pending media for [${senderId}]:`, error);
-                            twiml.message(MEDIA_MESSAGES.ERROR_PROCESSING_PENDING_MEDIA);
-                        } finally {
-                            // Clean up the stored media file and the pending state
-                            console.log(`index.ts: Deleting processed pending media file: ${filePath}`);
-                            await fsPromises.unlink(filePath).catch(err => console.error(`Failed to delete pending file: ${err}`));
-                            delete pendingMedia[senderId];
-                        }
-                    } else {
-                        // Standard text chat logic
-                        if (!chatHistories[senderId]) {
-                            chatHistories[senderId] = [];
-                        }
-                        console.log(`index.ts: No command recognized. Passing to Gemini for sender [${senderId}].`);
-                        const useSystemInstructionForTask = isTaskManagementRequest(incomingMsg);
-                        const { responseText: geminiResponseText, googleSearchUsed } = await generateGeminiChatResponse(ai, senderId, incomingMsg, chatHistories, useSystemInstructionForTask);
-                        
-                        console.log(`index.ts: Raw response from Gemini for [${senderId}]: "${geminiResponseText}" (Google Search Used: ${googleSearchUsed})`);
-
-                        let actionWasHandled = false;
-                        try {
-                            const jsonMatch = geminiResponseText.match(/\{[\s\S]*\}/);
-
-                            if (jsonMatch) {
-                                const jsonString = jsonMatch[0];
-                                const parsedJson = JSON.parse(jsonString);
-
-                                // --- Handle Task Creation Request ---
-                                if (parsedJson && parsedJson.isTask === true && parsedJson.details) {
-                                    actionWasHandled = true;
-                                    console.log(`index.ts: Gemini identified a task creation request for [${senderId}].`);
-                                    const taskDetails = (parsedJson as IdentifiedTask).details;
-
-                                    if (!isUserAuthenticated(senderId)) {
-                                        twiml.message(AUTH_MESSAGES.TASK_CREATION_AUTH_REQUIRED);
-                                    } else {
-                                        console.log(`index.ts: Calling createGoogleTask for [${senderId}] with details:`, JSON.stringify(taskDetails, null, 2));
-                                        
-                                        // Combine all details into a single description string for the Google Task notes.
-                                        const combinedDescription = [
-                                            `Description: ${taskDetails.description}`,
-                                            `Final Result: ${taskDetails.final_result}`,
-                                            `User Experience: ${taskDetails.user_experience}`
-                                        ].join('\n\n');
-
-                                        const result = await createGoogleTask(senderId, {
-                                            title: taskDetails.objective,
-                                            description: combinedDescription,
-                                        });
-
-                                        if (typeof result === 'string') {
-                                            twiml.message(result); // Send error message
-                                        } else {
-                                            const taskTitle = result.title ?? 'Untitled Task';
-                                            const successMessage = TASK_MESSAGES.SUCCESS(taskTitle);
-                                            twiml.message(successMessage);
-                                            console.log(`index.ts: Successfully created task titled "${taskTitle}" for [${senderId}].`);
-                                        }
-                                    }
-                                }
-                                // --- Handle Task Listing Request ---
-                                else if (parsedJson.isTaskListRequest === true) {
-                                    actionWasHandled = true;
-                                    console.log(`index.ts: Gemini identified a task list request for [${senderId}].`);
-                                    if (!isUserAuthenticated(senderId)) {
-                                        twiml.message(AUTH_MESSAGES.TASK_LISTING_AUTH_REQUIRED);
-                                    } else {
-                                        const tasksString = await getFormattedTasksString(senderId);
-                                        twiml.message(tasksString);
-                                        console.log(`index.ts: Successfully sent task list to [${senderId}].`);
-                                    }
-                                }
-                                // --- Handle Task Deletion Request ---
-                                else if (parsedJson.isTaskDeletionRequest === true) {
-                                    actionWasHandled = true;
-                                    console.log(`index.ts: Gemini identified a task deletion request for [${senderId}].`);
-                                    if (!isUserAuthenticated(senderId)) {
-                                        twiml.message(AUTH_MESSAGES.TASK_DELETION_AUTH_REQUIRED);
-                                    } else {
-                                        // Fetch the user's current tasks to present them for deletion.
-                                        const taskTitles = await getTaskTitles(senderId);
-                                        if (taskTitles && taskTitles.length > 0) {
-                                            // Store the list of task titles in the pendingDeletion state.
-                                            pendingDeletion[senderId] = taskTitles;
-                                            // Format the message to list the tasks for the user.
-                                            const tasksListForDeletion = taskTitles.map((title, index) => `${index + 1}. ${title}`).join('\n');
-                                            const deletionPrompt = `${TASK_MESSAGES.DELETION_PROMPT}\n${tasksListForDeletion}`;
-                                            twiml.message(deletionPrompt);
-                                            console.log(`index.ts: Prompting user [${senderId}] to select a task for deletion.`);
-                                        } else {
-                                            twiml.message(TASK_MESSAGES.DELETION_NO_TASKS);
-                                            console.log(`index.ts: User [${senderId}] tried to delete a task, but they have none.`);
-                                        }
-                                    }
-                                }
-                                // NOTE: Other JSON-based actions like listing/deleting would be handled here with 'else if'
-                            } 
-                        } catch (error) {
-                            console.warn(`index.ts: Failed to parse potential JSON from Gemini response for [${senderId}]. Error: ${error}`);
-                        }
-
-                        // --- Fallback to Normal Chat ---
-                        if (!actionWasHandled) {
-                            console.log(`index.ts: No actionable JSON found. Treating as a regular chat message for [${senderId}].`);
-                            if (!geminiResponseText) {
-                                twiml.message(GENERAL_MESSAGES.GEMINI_EMPTY_RESPONSE);
-                            } else {
-                                twiml.message(formatGeminiResponse(geminiResponseText, googleSearchUsed));
-                            }
-                        }
-                    }
-                }
-            }
+            return;
         }
     }
 
-    console.log(`index.ts: Sending final TwiML response to [${senderId}].`);
-    res.writeHead(200, { 'Content-Type': 'text/xml' });
-    res.end(twiml.toString());
+    // 3. Text Message Handling
+    const messageBody = req.body.Body as string | undefined;
+
+    // Check for an empty message body, which can happen with some media types or client issues.
+    if (!messageBody) {
+        console.warn(`index.ts: Received empty message body from [${senderId}].`);
+        twiml.message(GENERAL_MESSAGES.EMPTY_MESSAGE_BODY);
+        res.type('text/xml').send(twiml.toString());
+        return;
+    }
+
+    const normalizedMessage = messageBody.trim();
+    const lcNormalizedMessage = normalizedMessage.toLowerCase();
+    
+    // --- User state checks ---
+    // Check if the user is responding to a pending media prompt.
+    if (pendingMedia[senderId]) {
+        console.log(`index.ts: Detected pending media for user [${senderId}]. Processing with new prompt.`);
+        const { filePath, mimeType } = pendingMedia[senderId];
+        delete pendingMedia[senderId]; // Clear pending state
+        
+        try {
+            const { responseText, googleSearchUsed } = await processMedia(filePath, mimeType, senderId, normalizedMessage);
+            await handleGeminiResponse(responseText, googleSearchUsed, senderId, twiml);
+        } catch (error) {
+            console.error(`index.ts: Error processing pending media for [${senderId}]:`, error);
+            twiml.message(MEDIA_MESSAGES.ERROR_PROCESSING_PENDING_MEDIA);
+        } finally {
+            // Always clean up the file after processing is complete or has failed.
+            try {
+                await fsPromises.unlink(filePath);
+                console.log(`index.ts: Cleaned up pending media file [${filePath}].`);
+            } catch (cleanupError) {
+                console.error(`index.ts: Failed to clean up pending media file [${filePath}].`, cleanupError);
+            }
+            res.type('text/xml').send(twiml.toString());
+        }
+        return;
+    }
+
+    // Check if the user is responding to a task deletion prompt.
+    if (pendingDeletion[senderId]) {
+        const taskTitles = pendingDeletion[senderId];
+        delete pendingDeletion[senderId]; // Consume the pending state
+        
+        const taskToMark = findTaskFromReply(normalizedMessage, taskTitles);
+        if (taskToMark) {
+            console.log(`index.ts: User [${senderId}] selected task "${taskToMark}" for deletion.`);
+            const deletionResult = await deleteGoogleTask(senderId, taskToMark);
+            twiml.message(deletionResult);
+        } else {
+            twiml.message(`I couldn't find a task matching your reply. Please try starting the deletion process again.`);
+        }
+        res.type('text/xml').send(twiml.toString());
+        return;
+    }
+    
+    // Check for new vs. returning users and send a welcome message if needed.
+    const isNewUser = !(await isReturningUser(senderId));
+    if (isNewUser) {
+        sendWelcomeMessage(twiml);
+        await addNewUser(senderId); // Mark them as a returning user for the future
+        res.type('text/xml').send(twiml.toString());
+        return;
+    }
+    
+    // --- Command Handling ---
+    if (normalizedMessage.startsWith('/')) {
+        console.log(`index.ts: Detected command "${lcNormalizedMessage}" from [${senderId}].`);
+        const isAuthenticated = await isUserAuthenticated(senderId);
+
+        switch (lcNormalizedMessage) {
+            case '/start':
+            case '/help':
+                sendWelcomeMessage(twiml);
+                break;
+            case '/connect_google_tasks':
+                if (isAuthenticated) {
+                    twiml.message(AUTH_MESSAGES.ALREADY_AUTHENTICATED);
+                } else {
+                    const authUrl = `${SERVER_BASE_URL}/auth/google/initiate?senderId=${encodeURIComponent(senderId)}`;
+                    twiml.message(AUTH_MESSAGES.INITIATE_AUTH_INSTRUCTIONS.replace('{authUrl}', authUrl));
+                }
+                break;
+            case '/disconnect_google_tasks':
+                const cleared = await clearUserTokens(senderId);
+                twiml.message(cleared ? AUTH_MESSAGES.DISCONNECT_SUCCESS : AUTH_MESSAGES.DISCONNECT_FAILURE);
+                break;
+            case '/status_google_tasks':
+                const statusMessage = await getAuthStatus(senderId);
+                twiml.message(statusMessage);
+                break;
+            case '/list_task_lists':
+                if (!isAuthenticated) {
+                    twiml.message(AUTH_MESSAGES.TASK_LISTING_AUTH_REQUIRED);
+                    break;
+                }
+                const lists = await listTaskLists(senderId);
+                if (typeof lists === 'string') {
+                    twiml.message(lists);
+                } else if (lists.length === 0) {
+                    twiml.message("You have no Google Task lists.");
+                } else {
+                    const listNames = lists.map(list => `• ${list.title}`).join('\n');
+                    twiml.message(`*Your Google Task Lists:*\n${listNames}`);
+                }
+                break;
+            case '/get_tasks':
+                if (!isAuthenticated) {
+                    twiml.message(AUTH_MESSAGES.TASK_LISTING_AUTH_REQUIRED);
+                    break;
+                }
+                const tasksString = await getFormattedTasksString(senderId);
+                twiml.message(tasksString);
+                break;
+            default:
+                twiml.message(INVALID_COMMAND_MESSAGE);
+                break;
+        }
+    } else {
+        // --- AI Chat & Task Management Logic ---
+        console.log(`index.ts: No command detected. Treating as a general chat or task message from [${senderId}].`);
+        const useSystemInstruction = isTaskManagementRequest(normalizedMessage);
+        const { responseText, googleSearchUsed } = await generateGeminiChatResponse(ai, senderId, normalizedMessage, chatHistories, useSystemInstruction);
+
+        await handleGeminiResponse(responseText, googleSearchUsed, senderId, twiml);
+    }
+
+    res.type('text/xml').send(twiml.toString());
 });
 
+// --- ERROR HANDLING & SERVER STARTUP ---
+
+function errorHandler(err: Error, req: Request, res: Response, next: NextFunction) {
+    console.error("--- UNHANDLED ERROR ---");
+    console.error(err.stack);
+    res.status(500).send('Something broke!');
+}
 
 // --- UTILITY FUNCTIONS ---
-// This function downloads media from a Twilio URL and saves it to a local temporary file.
+
+/**
+ * A central function to handle the processing of any supported media type.
+ * It determines the correct Gemini function to call based on the MIME type.
+ * @param filePath The local path to the downloaded media file.
+ * @param mimeType The MIME type of the file.
+ * @param senderId The user's ID.
+ * @param prompt The text prompt accompanying the media.
+ * @returns A promise that resolves to the text response from Gemini.
+ */
+async function processMedia(filePath: string, mimeType: string, senderId: string, prompt: string): Promise<{responseText: string, googleSearchUsed: boolean}> {
+    const useSystemInstruction = isTaskManagementRequest(prompt);
+    
+    if (mimeType.startsWith('audio/')) {
+        const effectivePrompt = prompt.trim() === "" ? FIXED_TEXT_PROMPT_FOR_AUDIO : prompt;
+        return await processAudioWithGemini(ai, senderId, filePath, mimeType, effectivePrompt, chatHistories, useSystemInstruction);
+    } else if (mimeType.startsWith('image/')) {
+        return await processImageWithGemini(ai, senderId, filePath, mimeType, prompt, chatHistories, useSystemInstruction);
+    } else if (mimeType.startsWith('video/')) {
+        return await processVideoWithGemini(ai, senderId, filePath, mimeType, prompt, chatHistories, useSystemInstruction);
+    } else if (['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'].includes(mimeType)) {
+        return await processDocumentWithGemini(ai, senderId, filePath, mimeType, prompt, chatHistories, useSystemInstruction);
+    } else {
+        console.warn(`index.ts: Unsupported media type [${mimeType}] passed to processMedia for [${senderId}].`);
+        const errorText = MEDIA_MESSAGES.UNSUPPORTED_MEDIA_TYPE;
+        return { responseText: errorText, googleSearchUsed: false };
+    }
+}
+
+/**
+ * Downloads a media file from a Twilio URL and saves it to a local temporary directory.
+ * @param {string} mediaUrl The URL of the media file on Twilio's servers.
+ * @param {string} mediaContentType The MIME type of the media.
+ * @param {string} senderId The sender's ID, used for creating a unique filename.
+ * @returns {Promise<string>} A promise that resolves with the local path to the saved file.
+ */
 async function downloadAndSaveMediaFile(mediaUrl: string, mediaContentType: string, senderId: string): Promise<string> {
-    const sanitizedSenderId = senderId.replace(/[^a-zA-Z0-9]/g, '_');
     const fileExtension = mediaContentType.split('/')[1] || 'tmp';
-    const localFilePath = path.join(mediaDir, `${sanitizedSenderId}-${Date.now()}.${fileExtension}`);
+    const localFilePath = path.join(mediaDir, `${senderId}-${Date.now()}.${fileExtension}`);
     
     const response = await axios({
         method: 'GET',
@@ -650,14 +699,9 @@ async function downloadAndSaveMediaFile(mediaUrl: string, mediaContentType: stri
     });
 }
 
-
 // --- START EXPRESS SERVER ---
-// Load returning users from file before starting the server.
-returningUsers = loadReturningUsers();
-
+app.use(errorHandler);
 app.listen(PORT, () => {
-    console.log(`index.ts: Express server started and listening on port ${PORT}.`);
-    console.log(`index.ts: Twilio webhook endpoint available at /webhook/twilio`);
-    console.log(`index.ts: Google OAuth initiation route available at ${SERVER_BASE_URL}/auth/google/initiate?senderId=YOUR_SENDER_ID`);
-    console.log(`index.ts: Google OAuth callback configured for ${GOOGLE_REDIRECT_URI}`);
+    console.log(`Server listening on port ${PORT}.`);
+    console.log(`Open ${SERVER_BASE_URL} to see the running application.`);
 }); 

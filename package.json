@@ -12,6 +12,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@google-cloud/firestore": "^7.11.2",
     "@google/genai": "^1.7.0",
     "axios": "^1.10.0",
     "dotenv": "^16.4.5",

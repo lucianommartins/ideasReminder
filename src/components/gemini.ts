@@ -158,7 +158,7 @@ async function _processMediaWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
-): Promise<string> {
+): Promise<{responseText: string, googleSearchUsed: boolean}> {
     console.log(`gemini.ts: Processing ${mediaType} for [${senderId}]. File: ${filePath}, Type: ${mimeType}`);
     const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
 
@@ -171,7 +171,8 @@ async function _processMediaWithGemini(
 
         if (!uploadedFile.uri || !uploadedFile.mimeType) {
             console.error(`gemini.ts: Invalid file upload response for ${mediaType} from [${senderId}].`);
-            return `Sorry, there was a problem uploading your ${mediaType.toLowerCase()} file.`;
+            const errorText = `Sorry, there was a problem uploading your ${mediaType.toLowerCase()} file.`;
+            return { responseText: errorText, googleSearchUsed: false };
         }
         console.log(`gemini.ts: ${mediaType} file uploaded for [${senderId}]. URI: ${uploadedFile.uri}`);
 
@@ -207,13 +208,12 @@ async function _processMediaWithGemini(
             chatHistories[senderId] = currentHistory;
         }
         
-        // For media processing, we'll return only the text for now to keep the interface simple.
-        // The search usage information is lost here, but can be added if needed by changing the return type.
-        return modelResponseText;
+        return { responseText: modelResponseText, googleSearchUsed };
 
     } catch (error) {
         console.error(`gemini.ts: Error processing ${mediaType} for [${senderId}]:`, error);
-        return `Sorry, I encountered an error trying to understand your ${mediaType.toLowerCase()}. Please try again later.`;
+        const errorText = `Sorry, I encountered an error trying to understand your ${mediaType.toLowerCase()}. Please try again later.`;
+        return { responseText: errorText, googleSearchUsed: false };
     }
 }
 
@@ -228,7 +228,7 @@ export async function processAudioWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
-): Promise<string> {
+): Promise<{responseText: string, googleSearchUsed: boolean}> {
     return _processMediaWithGemini('Audio', aiClient, senderId, audioFilePath, audioMimeType, textPrompt, chatHistories, useSystemInstruction);
 }
 
@@ -243,7 +243,7 @@ export async function processImageWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
-): Promise<string> {
+): Promise<{responseText: string, googleSearchUsed: boolean}> {
     return _processMediaWithGemini('Image', aiClient, senderId, imageFilePath, imageMimeType, textPrompt, chatHistories, useSystemInstruction);
 }
 
@@ -258,7 +258,7 @@ export async function processVideoWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
-): Promise<string> {
+): Promise<{responseText: string, googleSearchUsed: boolean}> {
     return _processMediaWithGemini('Video', aiClient, senderId, videoFilePath, videoMimeType, textPrompt, chatHistories, useSystemInstruction);
 }
 
@@ -273,6 +273,6 @@ export async function processDocumentWithGemini(
     textPrompt: string,
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
-): Promise<string> {
+): Promise<{responseText: string, googleSearchUsed: boolean}> {
     return _processMediaWithGemini('Document', aiClient, senderId, documentFilePath, documentMimeType, textPrompt, chatHistories, useSystemInstruction);
 }
