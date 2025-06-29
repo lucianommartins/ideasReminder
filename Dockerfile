@@ -21,7 +21,9 @@ COPY src/ ./src/
 # Build the TypeScript code to JavaScript && prune devDependencies
 RUN npm run build && npm prune --production
 
-# The main application listens on port 3000
+# Inform Docker that the container listens on the specified network port at runtime.
+# This does not publish the port. It functions as a type of documentation
+# between the person who builds the image and the person who runs the container.
 EXPOSE 3000
 
 # Define the command to run the application

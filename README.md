@@ -1,4 +1,4 @@
-# 💡 VoiceTasks - Your WhatsApp Sidekick for Ideas and Tasks! 🧠
+# 💡 VoiceTasks - Your WhatsApp Sidekick for Google Tasks
 
 VoiceTasks is a powerful WhatsApp bot designed to be your personal assistant. It leverages Google's Gemini AI to understand your text, voice notes, and images, and integrates seamlessly with **Google Tasks** to turn fleeting ideas into actionable items.
 
@@ -6,54 +6,43 @@ Built to be scalable and robust, this application uses **Google Cloud Firestore*
 
 ## ✨ Features
 
-*   **Conversational AI:** Chat naturally with the Gemini Pro model. It maintains a separate conversation history for each user.
-*   **Multimedia Processing:** Send audio, images, videos, or documents (PDF, DOCX, etc.) for Gemini to analyze and discuss.
-*   **Deep Google Tasks Integration:**
-    *   Securely connect your Google Account using an OAuth2 flow.
-    *   Let Gemini intelligently create, list, and manage your tasks.
-    *   Use simple commands like `/status_google_tasks` to check your connection.
-*   **Persistent & Scalable:** All user data, including authentication tokens, is stored securely in Google Cloud Firestore, ensuring no data is lost between server instances or deploys.
-*   **Stateless Architecture:** Designed to run efficiently on serverless platforms like Google Cloud Run.
+- **Conversational AI:** Chat naturally with the Gemini model. It maintains a separate conversation history for each user.
+- **Multimedia Processing:** Send audio, images, videos, or documents (PDF, DOCX, etc.) for Gemini to analyze and create tasks from.
+- **Intelligent Task Management:**
+    - The AI automatically identifies user intent to **create, list, or delete** tasks.
+    - Tasks are automatically scheduled for the **next business day**, skipping weekends.
+- **Dedicated Task List:** All tasks are organized into a specific `"GDM DevRel list"` within your Google Tasks, keeping your work organized.
+- **Secure Google Integration:**
+    - Connect your Google Account securely using a standard OAuth2 flow.
+    - User authentication tokens are stored securely in Google Cloud Firestore.
+- **Stateless & Scalable:** Designed to run efficiently on serverless platforms like Google Cloud Run.
+
+---
 
 ## 🛠️ Tech Stack
 
-*   **Backend:** Node.js, Express.js
-*   **Language:** TypeScript
-*   **Cloud Platform:** Google Cloud Run, Google Cloud Firestore
-*   **Messaging:** Twilio API (for WhatsApp)
-*   **AI & NLP:** Google Gemini API
-*   **Google Integration:** Google Tasks API, Google People API, Google Auth Library
+- **Backend:** Node.js, Express.js
+- **Language:** TypeScript
+- **Cloud Platform:** Google Cloud Run, Google Cloud Firestore
+- **Messaging:** Twilio API for WhatsApp
+- **AI & NLP:** Google Gemini API
+- **Google Integration:** Google Tasks API, Google Auth Library
 
 ---
 
 ## 🚀 Deployment Guide (Google Cloud Run)
 
-This guide covers deploying the application to Google Cloud Run.
-
 ### 1. Prerequisites
 
-*   Node.js (v18.x or later)
-*   A Google Cloud Platform (GCP) project with billing enabled.
-*   [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (the `gcloud` command-line tool) installed and authenticated.
-*   A Twilio account with a configured WhatsApp number.
+- A Google Cloud Platform (GCP) project with billing enabled.
+- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (`gcloud` CLI) installed and authenticated.
+- A Twilio account with a configured WhatsApp number.
+- Node.js (v20.x or later) installed for local testing.
 
-### 2. Initial Setup
-
-1.  **Clone the Repository**
-    ```bash
-    git clone https://github.com/your-username/VoiceTasks.git
-    cd VoiceTasks
-    ```
-
-2.  **Install Dependencies**
-    ```bash
-    npm install
-    ```
-
-### 3. Google Cloud Configuration
+### 2. Google Cloud Configuration
 
 1.  **Set Your Project ID**
-    Make sure `gcloud` is configured to use your target project.
+    Configure the `gcloud` CLI to use your target project.
     ```bash
     gcloud config set project YOUR_PROJECT_ID
     ```
@@ -64,39 +53,32 @@ This guide covers deploying the application to Google Cloud Run.
     chmod +x setup/enable_gcp_apis.sh
     ./setup/enable_gcp_apis.sh
     ```
-    This will enable Cloud Run, Firestore, Cloud Build, and other necessary services.
 
 3.  **Create the Firestore Database**
-    Next, run the script to create the Firestore database instance for the project.
+    Run the script to create the Firestore database instance for the project.
     ```bash
     chmod +x setup/setup_firestore.sh
     ./setup/setup_firestore.sh
     ```
-    This creates a database with the ID `voicetasks-db`.
 
 4.  **Create OAuth 2.0 Credentials**
-    *   Go to the [Google Cloud Console](https://console.cloud.google.com/) -> **APIs & Services** -> **Credentials**.
-    *   Click **+ CREATE CREDENTIALS** -> **OAuth client ID**.
-    *   Select **Web application** as the application type.
-    *   Give it a name (e.g., "VoiceTasks-WebApp").
-    *   You will need a **Redirect URI** later. For now, you can leave it blank or add a placeholder like `http://localhost`. We will update this after the first deploy.
-    *   Click **Create**. Copy the **Client ID** and **Client Secret**. You will need these for your `.env` file.
+    - Go to the [Google Cloud Console](https://console.cloud.google.com/) -> **APIs & Services** -> **Credentials**.
+    - Click **+ CREATE CREDENTIALS** -> **OAuth client ID**.
+    - Select **Web application** as the application type.
+    - Give it a name (e.g., "VoiceTasks-WebApp").
+    - You will need a **Redirect URI** later. For now, leave it blank. Click **Create** and copy the **Client ID** and **Client Secret**.
 
 5.  **Configure OAuth Consent Screen**
-    *   In the **OAuth consent screen** tab, choose **External** and create a new consent screen.
-    *   Fill in the required app information (app name, user support email, developer contact).
-    *   On the "Scopes" page, add the following scopes:
-        *   `openid`
-        *   `https://www.googleapis.com/auth/userinfo.profile`
-        *   `https://www.googleapis.com/auth/user.addresses.read`
-        *   `https://www.googleapis.com/auth/tasks`
-    *   On the "Test users" page, add the Google account(s) you will be testing with.
-    *   **Crucially**, once you are ready, go back and click **"PUBLISH APP"** to move it to "Production" mode. This prevents refresh tokens from expiring every 7 days.
+    - In the **OAuth consent screen** tab, choose **External** and create a consent screen.
+    - Fill in the required app info (app name, user support email, etc.).
+    - On the "Scopes" page, add the single required scope: `https://www.googleapis.com/auth/tasks`
+    - On the "Test users" page, add the Google account(s) you will be testing with.
+    - **Crucially**, once ready, **"PUBLISH APP"** to move it to Production to prevent refresh tokens from expiring every 7 days.
 
-### 4. Environment Variables & Deployment
+### 3. Environment Variables & Deployment
 
 1.  **Create the `.env` file**
-    Create a file named `.env` in the root of the project and add the following, filling in your credentials. **Leave `GOOGLE_REDIRECT_URI` blank for now.**
+    Create a `.env` file in the project root with the following variables. **Leave `GOOGLE_REDIRECT_URI` blank for the first deploy.**
 
     ```env
     # Twilio Credentials
@@ -109,55 +91,59 @@ This guide covers deploying the application to Google Cloud Run.
     # Google Gemini API Key
     GEMINI_API_KEY=your_gemini_api_key
 
-    # Google OAuth2 Credentials (from Step 3.4)
+    # Google OAuth2 Credentials (from Step 2.4)
     GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
     GOOGLE_CLIENT_SECRET=your_google_client_secret
 
-    # The URI for the Google Auth callback. We will get this URL after deploying.
-    # Example: https://voicetasks-service-xyz-uc.a.run.app/auth/google/callback
+    # This will be your Cloud Run service URL. Example: https://voicetasks-xyz-uc.a.run.app/auth/google/callback
     GOOGLE_REDIRECT_URI=
-
-    # Server Port (Cloud Run provides this automatically, but it's good for local testing)
-    PORT=8080
     ```
 
-2.  **First Deployment to Cloud Run**
-    Run the deployment script. You can specify your GCP region.
+2.  **First Deployment**
+    Run the deployment script, which builds the Docker image and deploys it to Cloud Run.
     ```bash
-    ./deploy/deploy.sh us-central1
+    ./deploy/deploy.sh
     ```
-    The first deployment will likely fail to start correctly because `GOOGLE_REDIRECT_URI` is missing, but it will create the service and give you a **Service URL** (e.g., `https://voicetasks-service-xyz-uc.a.run.app`). **Copy this URL.**
+    The first deployment will create the service and give you a **Service URL** (e.g., `https://voicetasks-xyz-uc.a.run.app`). **Copy this URL.**
 
-3.  **Update Credentials and `.env` file**
-    *   **Google Cloud Console:** Go back to your OAuth Client ID credentials. Under "Authorized redirect URIs", add the following:
-        `YOUR_SERVICE_URL/auth/google/callback`
-        (e.g., `https://voicetasks-service-xyz-uc.a.run.app/auth/google/callback`)
-    *   **.env file:** Now, update the `GOOGLE_REDIRECT_URI` in your `.env` file with this same URL.
+3.  **Update Credentials and `.env`**
+    - **Google Cloud Console:** Go back to your OAuth Client ID credentials. Under "Authorized redirect URIs", add `YOUR_SERVICE_URL/auth/google/callback`.
+    - **`.env` file:** Now, update the `GOOGLE_REDIRECT_URI` in your `.env` file with this same URL.
 
 4.  **Final Deployment**
     Run the deploy script again. This time, it will inject the correct environment variables, and the service will start successfully.
     ```bash
-    ./deploy/deploy.sh us-central1
+    ./deploy/deploy.sh
     ```
 
-### 5. Configure Twilio Webhook
+### 4. Configure Twilio Webhook
 
-*   Go to your Twilio number settings in the Twilio Console.
-*   Under the "Messaging" section, in the "A MESSAGE COMES IN" field, set the webhook to your Cloud Run Service URL followed by `/webhook/twilio`.
-*   **Example:** `https://voicetasks-service-xyz-uc.a.run.app/webhook/twilio`
-*   Ensure the HTTP method is set to `HTTP POST`.
-*   Save your changes. Your bot is now live!
+- Go to your Twilio number settings in the Twilio Console.
+- Under "Messaging", for "A MESSAGE COMES IN", set the webhook to:
+  `https://your-service-url.a.run.app/webhook/twilio`
+- Ensure the method is `HTTP POST`. Your bot is now live!
 
 ## 🤖 Bot Commands
 
-Interact with the bot using the following commands in WhatsApp:
+- **Any message not starting with `/`**: Starts a conversation with the Gemini AI. The AI can identify and act on requests to create, list, or delete tasks.
+- `/connect_google_tasks`: Initiates the process to connect your Google Tasks account.
+- `/disconnect_google_tasks`: Disconnects your Google account.
+- `/status_google_tasks`: Checks if you are connected to Google.
+- `/get_tasks`: Manually requests a list of all tasks in your dedicated list.
+- `/help` or `/start`: Shows the welcome message.
 
-*   **Any message not starting with `/`**: Starts or continues a conversation with the Gemini AI. The AI can now identify and act on requests to create, list, or delete tasks.
-*   `/connect_google_tasks`: Initiates the process to connect your Google Tasks account.
-*   `/disconnect_google_tasks`: Disconnects your Google Tasks account and deletes your token from Firestore.
-*   `/status_google_tasks`: Checks if you are connected to Google.
-*   `/help` or `/start`: Shows the initial welcome message.
+## 🏗️ Project Structure
+
+The project is organized into several key components within the `src/` directory:
+
+- `index.ts`: The main entry point. Sets up the Express server, handles Twilio webhooks, and orchestrates the overall application flow.
+- `components/`: Contains all the core logic, broken down by responsibility.
+    - `gauth.ts`: Manages all Google authentication, including the OAuth2 flow and token refreshing.
+    - `gemini.ts`: Handles all interactions with the Google Gemini API, including text and media processing.
+    - `gtasks.ts`: Manages all interactions with the Google Tasks API.
+    - `firestore.ts`: Centralizes all database operations with Google Cloud Firestore.
+    - `prompts.ts`: Contains all system-level instructions and fixed user-facing text strings.
+- `types/`: Holds all custom TypeScript type definitions and interfaces for the project.
 
 ---
-
-Happy idea capturing and task managing! 
+Happy tasking! 

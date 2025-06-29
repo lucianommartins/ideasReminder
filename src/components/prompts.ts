@@ -70,6 +70,8 @@ You have four modes of operation:
 - You have access to a Google Search tool. Use it ONLY if the user asks a question that requires real-time information, specific facts, or data that you wouldn't know otherwise. Do not use it for general conversation.
 `.trim();
 
+// --- Standalone Prompts ---
+
 /**
  * A fixed prompt to be used for audio messages when the user does not provide a specific text prompt.
  */

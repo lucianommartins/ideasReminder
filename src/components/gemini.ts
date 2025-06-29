@@ -1,9 +1,8 @@
 /**
  * @file gemini.ts
  * @description This module encapsulates all interactions with the Google Gemini API.
- * It handles text chats, processes various media types (audio, image, video, document),
- * maintains conversation history, and includes a priming mechanism to ensure the AI
- * responds in the user's language.
+ * It provides functions to handle text-only chats and multimodal chats (text with media),
+ * manage conversation history, and conditionally apply system instructions.
  */
 
 import { GoogleGenAI, createPartFromUri, Part } from "@google/genai";
@@ -11,7 +10,7 @@ import { ChatHistoryItem, ChatHistories, ChatMessagePart } from "../types/chat";
 import { systemInstruction } from "./prompts";
 
 /**
- * Interface for the result of the internal chat interaction helper.
+ * Defines the standardized response structure from Gemini interactions.
  */
 interface GeminiChatInteractionResult {
     modelResponseText: string;
@@ -19,35 +18,29 @@ interface GeminiChatInteractionResult {
 }
 
 /**
- * Internal helper function to perform a chat interaction with Gemini.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender (for logging).
- * @param currentHistoryForUser The current chat history for this specific user.
- * @param messageContentToSend The content to send to Gemini (string for text, Part[] for multimodal).
- * @param userHistoryPartsToLog The parts of the user's message to log in history.
- * @param useSystemInstruction A flag to control whether to use system instructions.
- * @returns A promise that resolves to a GeminiChatInteractionResult.
+ * A private helper function to perform the core chat interaction with the Gemini API.
+ * @param aiClient The initialized GoogleGenAI client.
+ * @param senderId A unique identifier for the user, used for logging.
+ * @param currentHistoryForUser The user's current chat history.
+ * @param messageContentToSend The content to send (string for text, Part[] for multimodal).
+ * @param userHistoryPartsToLog The representation of the user's message to be saved in history.
+ * @param useSystemInstruction A flag to control whether to use the main system instruction.
+ * @returns A promise resolving to a GeminiChatInteractionResult.
  */
 async function _performGeminiChatInteraction(
     aiClient: GoogleGenAI,
-    senderId: string, // For logging
+    senderId: string, 
     currentHistoryForUser: ChatHistoryItem[],
     messageContentToSend: string | Part[],
     userHistoryPartsToLog: ChatMessagePart[],
-    useSystemInstruction: boolean = true // Added flag to control instruction usage
+    useSystemInstruction: boolean = true
 ): Promise<GeminiChatInteractionResult> {
     console.log(`gemini.ts_internal: Starting a new chat session for [${senderId}] with model gemini-2.5-flash.`);
     
-    // Base configuration
     const config: any = {
-        tools: [
-            {
-                googleSearch: {},
-            }
-        ],
+        tools: [{ googleSearch: {} }],
     };
 
-    // Conditionally add system instruction
     if (useSystemInstruction) {
         config.systemInstruction = systemInstruction;
     }
@@ -64,9 +57,7 @@ async function _performGeminiChatInteraction(
     const modelResponseText = response.text ? response.text.trim() : '';
     let googleSearchUsed = false;
 
-    // Correct way to check for grounding with Google Search.
-    // We store the potentially undefined property in a variable first
-    // to make the check more explicit and satisfy the linter.
+    // Check if grounding with Google Search was used.
     const groundingSupports = response.candidates?.[0]?.groundingMetadata?.groundingSupports;
     if (groundingSupports && groundingSupports.length > 0) {
         googleSearchUsed = true;
@@ -74,7 +65,7 @@ async function _performGeminiChatInteraction(
     }
 
     if (modelResponseText) {
-        console.log(`gemini.ts_internal: Successfully generated text from Gemini for [${senderId}]: "${modelResponseText}"`);
+        console.log(`gemini.ts_internal: Successfully generated text from Gemini for [${senderId}].`);
     } else {
         console.warn(`gemini.ts_internal: Gemini API returned empty text for [${senderId}].`);
     }
@@ -83,13 +74,13 @@ async function _performGeminiChatInteraction(
 }
 
 /**
- * Generates a chat response using the Gemini API, maintaining conversation history.
- * @param aiClient The initialized GoogleGenAI client instance.
- * @param senderId The unique identifier for the user/sender.
- * @param newUserMessage The new message from the user.
- * @param chatHistories An object storing chat histories for all users.
+ * Generates a text-based chat response from Gemini and updates the conversation history.
+ * @param aiClient The initialized GoogleGenAI client.
+ * @param senderId The unique identifier for the user.
+ * @param newUserMessage The new text message from the user.
+ * @param chatHistories A record of all user chat histories.
  * @param useSystemInstruction A flag to control whether to use system instructions.
- * @returns A promise that resolves to the generated text response, or an empty string if an error occurs.
+ * @returns A promise that resolves to the standardized response object.
  */
 export async function generateGeminiChatResponse(
     aiClient: GoogleGenAI,
@@ -98,9 +89,7 @@ export async function generateGeminiChatResponse(
     chatHistories: ChatHistories,
     useSystemInstruction: boolean
 ): Promise<{responseText: string, googleSearchUsed: boolean}> {
-    console.log(`gemini.ts: Entered generateGeminiChatResponse() for sender [${senderId}].`);
-    console.log(`gemini.ts: New message from user [${senderId}]: "${newUserMessage}"`);
-
+    console.log(`gemini.ts: New text message from user [${senderId}]: "${newUserMessage}"`);
     const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
 
     try {
@@ -115,16 +104,9 @@ export async function generateGeminiChatResponse(
             useSystemInstruction
         );
 
-        // Restore history saving
         if (modelResponseText) {
-            currentHistory.push({
-                role: "user",
-                parts: userHistoryParts,
-            });
-            currentHistory.push({
-                role: "model",
-                parts: [{ text: modelResponseText }],
-            });
+            currentHistory.push({ role: "user", parts: userHistoryParts });
+            currentHistory.push({ role: "model", parts: [{ text: modelResponseText }] });
             chatHistories[senderId] = currentHistory;
         }
 
@@ -137,17 +119,17 @@ export async function generateGeminiChatResponse(
 }
 
 /**
- * A generic, internal function to process any media file with Gemini.
+ * A generic, private function to process any media file with Gemini.
  * It uploads the file, sends it to the model with a prompt, and updates chat history.
- * @param mediaType A string descriptor for the media type (e.g., "audio", "image") for logging purposes.
+ * @param mediaType A string descriptor for the media type (e.g., "Audio", "Image") for logging.
  * @param aiClient The initialized GoogleGenAI client.
  * @param senderId The user's unique identifier.
- * @param filePath Path to the local media file.
- * @param mimeType MIME type of the media file.
+ * @param filePath The local path to the media file.
+ * @param mimeType The MIME type of the media file.
  * @param textPrompt The text prompt to accompany the media.
  * @param chatHistories The collection of all user chat histories.
  * @param useSystemInstruction A flag to control whether to use system instructions.
- * @returns A promise that resolves to the generated text response.
+ * @returns A promise that resolves to the standardized response object.
  */
 async function _processMediaWithGemini(
     mediaType: 'Audio' | 'Image' | 'Video' | 'Document',
@@ -163,7 +145,6 @@ async function _processMediaWithGemini(
     const currentHistory: ChatHistoryItem[] = chatHistories[senderId] || [];
 
     try {
-        console.log(`gemini.ts: Uploading ${mediaType} file [${filePath}] for [${senderId}]...`);
         const uploadedFile = await aiClient.files.upload({
             file: filePath,
             config: { mimeType: mimeType },
@@ -174,7 +155,6 @@ async function _processMediaWithGemini(
             const errorText = `Sorry, there was a problem uploading your ${mediaType.toLowerCase()} file.`;
             return { responseText: errorText, googleSearchUsed: false };
         }
-        console.log(`gemini.ts: ${mediaType} file uploaded for [${senderId}]. URI: ${uploadedFile.uri}`);
 
         const messageContentToSend: Part[] = [
             createPartFromUri(uploadedFile.uri, uploadedFile.mimeType),
@@ -195,16 +175,9 @@ async function _processMediaWithGemini(
             useSystemInstruction
         );
         
-        // Restore history saving for media processing
         if (modelResponseText) {
-            currentHistory.push({
-                role: "user",
-                parts: userHistoryPartsToLog,
-            });
-            currentHistory.push({
-                role: "model",
-                parts: [{ text: modelResponseText }],
-            });
+            currentHistory.push({ role: "user", parts: userHistoryPartsToLog });
+            currentHistory.push({ role: "model", parts: [{ text: modelResponseText }] });
             chatHistories[senderId] = currentHistory;
         }
         
@@ -219,6 +192,7 @@ async function _processMediaWithGemini(
 
 /**
  * Processes an audio file with Gemini by calling the generic media processor.
+ * All parameters are passed to the internal _processMediaWithGemini function.
  */
 export async function processAudioWithGemini(
     aiClient: GoogleGenAI,
@@ -234,6 +208,7 @@ export async function processAudioWithGemini(
 
 /**
  * Processes an image file with Gemini by calling the generic media processor.
+ * All parameters are passed to the internal _processMediaWithGemini function.
  */
 export async function processImageWithGemini(
     aiClient: GoogleGenAI,
@@ -249,6 +224,7 @@ export async function processImageWithGemini(
 
 /**
  * Processes a video file with Gemini by calling the generic media processor.
+ * All parameters are passed to the internal _processMediaWithGemini function.
  */
 export async function processVideoWithGemini(
     aiClient: GoogleGenAI,
@@ -264,6 +240,7 @@ export async function processVideoWithGemini(
 
 /**
  * Processes a document file with Gemini by calling the generic media processor.
+ * All parameters are passed to the internal _processMediaWithGemini function.
  */
 export async function processDocumentWithGemini(
     aiClient: GoogleGenAI,
