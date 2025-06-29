@@ -17,7 +17,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # Remove development dependencies to prepare for the production stage
-RUN npm prune --production
+RUN npm prune --omit=dev
 
 
 # --- Production Stage ---
