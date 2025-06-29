@@ -1,30 +1,38 @@
-# Use an official Node.js runtime as a parent image
-FROM node:20-slim
+# --- Build Stage ---
+# Use the Node.js 22 slim image, which contains all necessary build tools.
+FROM node:22-slim AS build
 
-# Update packages to the latest version to patch vulnerabilities.
-RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+# Update npm to the latest version to avoid version notices during the build
+RUN npm install -g npm@latest
 
-# Set the working directory in the container
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json.
-# The build context is the project root, so these paths are correct.
+# Copy package files and install all dependencies (including dev)
 COPY package*.json ./
-
-# Install ALL dependencies (including devDependencies) needed for the build
 RUN npm install
 
-# Copy the source code and typescript configuration
+# Copy the rest of the source code and build the application
 COPY tsconfig.json ./
 COPY src/ ./src/
+RUN npm run build
 
-# Build the TypeScript code to JavaScript && prune devDependencies
-RUN npm run build && npm prune --production
+# Remove development dependencies to prepare for the production stage
+RUN npm prune --production
 
-# Inform Docker that the container listens on the specified network port at runtime.
-# This does not publish the port. It functions as a type of documentation
-# between the person who builds the image and the person who runs the container.
+
+# --- Production Stage ---
+# Use a minimal "distroless" image. It contains only Node.js and the bare
+# minimum packages needed to run the app, drastically reducing vulnerabilities.
+FROM gcr.io/distroless/nodejs22-debian12
+
+WORKDIR /usr/src/app
+
+# Copy the built application and production dependencies from the build stage
+COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/node_modules ./node_modules
+
+# Expose the application port
 EXPOSE 3000
 
-# Define the command to run the application
-CMD [ "node", "dist/index.js" ] 
+# The distroless image's entrypoint is already 'node', so just specify the script.
+CMD [ "dist/index.js" ] 
